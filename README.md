@@ -21,13 +21,14 @@ Set-Location 'D:\Apple\apple-buy-bot'
 ```powershell
 python -m venv .venv
 & .\.venv\Scripts\python.exe -m pip install -r requirements.txt
-& .\.venv\Scripts\python.exe -m playwright install chromium
 & .\.venv\Scripts\python.exe -m src.main init
 & .\.venv\Scripts\python.exe -m pytest -v
 & .\.venv\Scripts\python.exe -m ruff check .
 ```
 
-要求 Python 3.12+；本次实测 Python 3.14.5、Playwright 1.62.0。`requirements.lock.txt` 保存本次通过检查的直接/间接依赖版本，可先安装它，再执行 `pip install -e . --no-deps` 复现。Python 3.12 本身未单独运行兼容性测试。
+要求 Python 3.12+ 和已安装的正式版 Google Chrome；程序使用 Playwright 的 chrome 通道，CLI、网页登录和购买流程统一使用正式版，不回退到 Chrome for Testing。现有独立 profile 路径保持不变，不读取个人 Chrome 的默认资料目录。首次在程序中登录后保存，过期或验证时人工处理。
+
+本次实测 Python 3.14.5、Playwright 1.62.0。`requirements.lock.txt` 保存本次通过检查的直接/间接依赖版本，可先安装它，再执行 `pip install -e . --no-deps` 复现。Python 3.12 本身未单独运行兼容性测试。
 
 ## 当前状态与证据
 
@@ -109,7 +110,7 @@ python -m src.main --headless inspect apple https://www.apple.com.cn/shop/buy-ip
 
 运行控制台输入 `resume [apple|jd|tmall]`、`status` 或 `stop`。验证期间浏览器保持打开，恢复后先重新检查登录/验证状态。提交结果 UNKNOWN 不可通过 resume 再次提交：先人工核查订单历史。出现验证的 inspect 同样等待人工，并在 resume 时只检查现有页面。
 
-`status` 读取 SQLite 历史记录，实时运行状态使用 Web `/status`。`doctor` 不执行真实登录或购买；默认网络是 NOT RUN，`--online` 额外执行一次公开 HEAD 请求。时钟诊断显示本地时间、UTC、目标时间、时区偏移；外部时钟误差未测量，不会声称完成时间同步。
+`status` 读取 SQLite 历史记录，实时运行状态使用 Web `/status`。`doctor` 用临时无窗口会话验证正式版 Chrome 能否启动并报告版本，不使用账号 profile、不执行真实登录或购买；默认网络是 NOT RUN，`--online` 额外执行一次公开 HEAD 请求。时钟诊断显示本地时间、UTC、目标时间、时区偏移；外部时钟误差未测量，不会声称完成时间同步。
 
 ## SKU 与提交保护
 

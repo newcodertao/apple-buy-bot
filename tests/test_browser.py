@@ -6,11 +6,13 @@ from datetime import UTC, datetime, timedelta
 from email.utils import format_datetime
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 from types import SimpleNamespace
+from unittest.mock import AsyncMock
 
 import pytest
 from playwright.async_api import Error
 
 from src.browser.manager import BrowserManager, navigate, retry_after_seconds
+from src.browser.session import ProfileLock
 from src.core.exceptions import ConfigurationError, HumanRequired, RetryableError, SelectorNotFound
 from src.core.models import LoginStatus, Platform
 from src.platforms.apple_cn.adapter import AppleCNAdapter
@@ -18,6 +20,25 @@ from src.platforms.jd.adapter import JDAdapter
 from src.platforms.tmall.adapter import TmallAdapter
 
 pytestmark = pytest.mark.browser
+
+
+async def test_missing_stable_chrome_releases_profile_without_fallback(tmp_path):
+    manager = BrowserManager(tmp_path / "profiles", headless=True)
+    launch = AsyncMock(side_effect=Error("test-only missing browser"))
+    manager._playwright = SimpleNamespace(
+        chromium=SimpleNamespace(launch_persistent_context=launch), stop=AsyncMock()
+    )
+    try:
+        with pytest.raises(HumanRequired, match="正式版 Google Chrome 无法打开"):
+            await manager.open(Platform.APPLE)
+        assert launch.await_count == 1
+        assert launch.await_args.kwargs["channel"] == "chrome"
+        assert manager.current_page(Platform.APPLE) is None
+        lock = ProfileLock(tmp_path / "profiles" / "apple")
+        lock.acquire()
+        lock.release()
+    finally:
+        await manager.close()
 
 
 class LocalFixtureAdapter(AppleCNAdapter):
@@ -240,19 +261,16 @@ async def test_inspect_rejects_wrong_domain_before_open_and_blocks_redirect(tmp_
 
 
 @pytest.mark.asyncio
-async def test_http_429_reports_bounded_retry_after(tmp_path, local_site):
+@pytest.mark.parametrize(
+    "path,minimum,maximum", [("/busy", 2, 2), ("/busy-long", 600, 600), ("/busy-date", 895, 900)]
+)
+async def test_http_429_reports_bounded_retry_after(tmp_path, local_site, path, minimum, maximum):
     manager = BrowserManager(tmp_path / "profiles", headless=True)
     try:
         page = await manager.open(Platform.APPLE)
         with pytest.raises(RetryableError) as raised:
-            await navigate(page, local_site + "/busy")
-        assert raised.value.retry_after == 2
-        with pytest.raises(RetryableError) as long_delay:
-            await navigate(page, local_site + "/busy-long")
-        assert long_delay.value.retry_after == 600
-        with pytest.raises(RetryableError) as date_delay:
-            await navigate(page, local_site + "/busy-date")
-        assert 895 <= date_delay.value.retry_after <= 900
+            await navigate(page, local_site + path)
+        assert minimum <= raised.value.retry_after <= maximum
     finally:
         await manager.close()
 

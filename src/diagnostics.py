@@ -1,11 +1,10 @@
-import asyncio
 import importlib.metadata
 import sys
-from pathlib import Path
 
 import httpx
-from playwright.async_api import async_playwright
+from playwright.async_api import Error, async_playwright
 
+from src.browser.manager import BROWSER_CHANNEL
 from src.core.clock import diagnostics
 from src.core.config import AppConfig
 from src.core.logging import safe_url
@@ -23,11 +22,24 @@ async def doctor(config: AppConfig, online: bool = False) -> dict:
     }
     checks["playwright"] = {"status": "PASS", "version": importlib.metadata.version("playwright")}
     async with async_playwright() as playwright:
-        executable = Path(playwright.chromium.executable_path)
-        checks["chromium"] = {
-            "status": "PASS" if await asyncio.to_thread(executable.is_file) else "FAIL",
-            "path": str(executable),
-        }
+        try:
+            # A disposable headless launch checks the actual selected browser,
+            # never the account profile or a bundled browser's unrelated path.
+            browser = await playwright.chromium.launch(channel=BROWSER_CHANNEL, headless=True)
+            try:
+                checks["chrome"] = {
+                    "status": "PASS",
+                    "channel": BROWSER_CHANNEL,
+                    "version": browser.version,
+                }
+            finally:
+                await browser.close()
+        except Error:
+            checks["chrome"] = {
+                "status": "FAIL",
+                "channel": BROWSER_CHANNEL,
+                "reason": "正式版 Google Chrome 无法启动，请检查安装和浏览器策略",
+            }
     database = Database(config.paths.database)
     try:
         database.initialize()

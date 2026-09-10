@@ -14,6 +14,8 @@ from src.browser.session import ProfileLock
 from src.core.exceptions import ConfigurationError, HumanRequired, RetryableError
 from src.core.models import LoginStatus, Platform
 
+BROWSER_CHANNEL = "chrome"
+
 
 def validate_url(url: str) -> None:
     try:
@@ -37,7 +39,7 @@ class BrowserSession:
 
 
 class BrowserManager:
-    """One persistent Chromium context per platform, guarded across processes."""
+    """One persistent stable Chrome context per platform, guarded across processes."""
 
     def __init__(self, profiles_dir: Path, headless: bool = False):
         self.profiles_dir = Path(profiles_dir).resolve()
@@ -79,6 +81,7 @@ class BrowserManager:
                     self._playwright = await async_playwright().start()
                 context = await self._playwright.chromium.launch_persistent_context(
                     user_data_dir=str(self.profiles_dir / platform.value),
+                    channel=BROWSER_CHANNEL,
                     headless=headless,
                     accept_downloads=False,
                     viewport={"width": 1280, "height": 900},
@@ -96,7 +99,7 @@ class BrowserManager:
                 profile_lock.release()
                 if isinstance(error, Error):
                     raise HumanRequired(
-                        "Chromium could not open; check installation and profile ownership"
+                        "正式版 Google Chrome 无法打开；请检查安装、浏览器策略或程序 profile 占用"
                     ) from None
                 raise
 
@@ -161,15 +164,31 @@ class BrowserManager:
 
 async def navigate(page: Page, url: str) -> None:
     validate_url(url)
+    response = None
+
+    def remember_document(candidate):
+        nonlocal response
+        request = candidate.request
+        if request.is_navigation_request() and request.frame == page.main_frame:
+            response = candidate
+
+    # Stable Chrome can emit a real HTTP response and then fail navigation
+    # while displaying its error page. Preserve Retry-After from that response.
+    page.on("response", remember_document)
+    failed = False
     try:
         response = await page.goto(url, wait_until="domcontentloaded")
     except Error:
-        raise RetryableError("Browser navigation failed or timed out") from None
+        failed = True
+    finally:
+        page.remove_listener("response", remember_document)
     if response and (response.status == 429 or response.status >= 500):
         delay = retry_after_seconds(response.headers.get("retry-after", ""))
         raise RetryableError("Platform temporarily unavailable", retry_after=delay)
     if response and response.status in {401, 403}:
         raise HumanRequired("Platform access requires manual verification")
+    if failed:
+        raise RetryableError("Browser navigation failed or timed out") from None
 
 
 def retry_after_seconds(value: str, now: datetime | None = None) -> float:
