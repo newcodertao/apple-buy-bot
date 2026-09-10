@@ -1,0 +1,44 @@
+<!doctype html>
+<html lang="zh-CN">
+<meta charset="utf-8"><meta name="viewport" content="width=device-width,initial-scale=1">
+<title>Apple 购买辅助 · 本机状态</title>
+<style>
+*{box-sizing:border-box}body{margin:0;background:#0f172a;color:#f8fafc;font:16px/1.6 system-ui,"Microsoft YaHei",sans-serif}
+main{max-width:1180px;margin:auto;padding:40px 24px}h1{font-size:30px;line-height:1.3;margin:10px 0}
+.sub,small{color:#cbd5e1}.label{letter-spacing:.12em;font-size:12px;color:#86efac}.bar{display:flex;justify-content:space-between;gap:24px;align-items:center;flex-wrap:wrap}
+.cards{display:grid;grid-template-columns:repeat(3,minmax(0,1fr));gap:16px;margin:28px 0}.card,.table{border:1px solid #334155;border-radius:12px;background:#111827;padding:20px}
+.value{font-size:20px;font-weight:650;overflow-wrap:anywhere}button{background:#1e293b;color:#f8fafc;border:1px solid #64748b;border-radius:8px;padding:11px 18px;cursor:pointer;font:inherit;min-height:44px}
+button:hover{background:#334155}button:focus-visible,a:focus-visible{outline:3px solid #86efac;outline-offset:3px}.primary{background:#166534;border-color:#22c55e}.danger{color:#fca5a5}
+.actions{display:flex;gap:10px;flex-wrap:wrap}.table{overflow:auto}table{border-collapse:collapse;width:100%;font-size:14px;white-space:nowrap}th,td{text-align:left;padding:14px 10px;border-bottom:1px solid #334155}th{color:#cbd5e1}
+#message{min-height:28px;color:#fcd34d}pre{white-space:pre-wrap;overflow-wrap:anywhere;max-height:280px;overflow:auto;font-size:13px;color:#cbd5e1}a{color:#86efac}footer{margin-top:28px;color:#cbd5e1;font-size:13px}
+@media(max-width:720px){main{padding:24px 16px}.cards{grid-template-columns:1fr}.card{padding:16px}h1{font-size:25px}}
+</style>
+<main>
+<div class="bar"><div><div class="label">APPLE BUY BOT · LOCAL</div><h1>购买辅助状态</h1><div class="sub">选择器未验证时暂停；人工处理后才继续。</div></div><a href="/docs">接口文档</a></div>
+<div class="cards"><section class="card"><small>本机时间</small><div id="time" class="value">读取中</div><small id="updated">尚未更新</small></section>
+<section class="card"><small>距离计划开售</small><div id="countdown" class="value">未设置</div><small id="target">等待确认商品开售时间</small></section>
+<section class="card"><small>运行方式</small><div id="mode" class="value">读取中</div><small id="guard">订单保护状态未知</small></section></div>
+<div class="bar"><h2>平台进度</h2><div class="actions"><button class="primary" data-action="start">启动</button><button data-action="resume">人工处理后继续</button><button class="danger" data-action="stop">停止</button><button id="refresh">暂停页面刷新</button></div></div>
+<p id="message" role="status" aria-live="polite"></p>
+<div class="table"><table><thead><tr><th>平台</th><th>状态</th><th>登录</th><th>SKU</th><th>库存</th><th>上次检测</th><th>重试</th><th>结果</th></tr></thead><tbody id="platforms"></tbody></table></div>
+<h2>最近事件</h2><pre id="events">尚无事件</pre>
+<footer>当前为第一轮工程。真实结算验收：NOT RUN。页面每 2 秒读取本机状态，不触发商品刷新。登录信息仅保存在本机浏览器 profile。</footer>
+</main>
+<script>
+let paused=false;const el=id=>document.getElementById(id);const platformNames={apple:'Apple 中国',jd:'京东',tmall:'天猫'};
+async function refresh(){if(paused||document.hidden)return;try{
+const [r,e]=await Promise.all([fetch('/status'),fetch('/events?limit=8')]);if(!r.ok||!e.ok)throw Error('状态服务不可用');
+const data=await r.json(),events=await e.json(),clock=data.clock||{};
+el('time').textContent=clock.local_time?clock.local_time.slice(11,19):new Date().toLocaleTimeString();el('updated').textContent=(clock.local_time?clock.local_time.slice(0,10)+' · ':'')+'更新于 '+new Date().toLocaleTimeString();
+const left=clock.time_until_target_seconds;el('countdown').textContent=left==null?'未设置':Math.max(0,Math.ceil(left))+' 秒';el('target').textContent=clock.target_time||'尚未配置';
+el('mode').textContent=data.dry_run?'演练 · 禁止提交':(data.auto_submit?'允许提交（须全部核验通过）':'仅到待提交');
+el('guard').textContent=data.order_guard?'订单锁：'+data.order_guard.status:'订单锁：空闲';
+el('platforms').replaceChildren();for(const [key,name]of Object.entries(platformNames)){let p=data.platforms?.[key]||{};const tr=document.createElement('tr');
+for(const text of [name,p.state||'IDLE',p.login||'UNKNOWN',p.sku?[p.sku.model,p.sku.capacity,p.sku.color].join(' / '):'—',p.stock==null?'未知':(p.stock?'有货':'无货'),p.last_check||'—',p.retries||0,p.result||'—']){let td=document.createElement('td');td.textContent=String(text);tr.append(td)}el('platforms').append(tr)}
+el('events').textContent=events.length?events.map(x=>[x.timestamp,x.platform,x.old_state+' → '+x.new_state,x.message].join('  ')).join('\n'):'尚无事件';
+if(data.background_error)el('message').textContent='运行异常：'+data.background_error;
+}catch(err){el('updated').textContent='连接中断 · 当前数据可能过期';el('message').textContent=err.message}}
+document.querySelectorAll('[data-action]').forEach(button=>button.addEventListener('click',async()=>{button.disabled=true;try{const r=await fetch('/'+button.dataset.action,{method:'POST',headers:{'Content-Type':'application/json','X-Apple-Bot-Control':'local'},body:'{}'});const body=await r.json();el('message').textContent=r.ok?body.status:(body.detail||'操作失败');await refresh()}catch{el('message').textContent='连接失败'}finally{button.disabled=false}}));
+el('refresh').onclick=()=>{paused=!paused;el('refresh').textContent=paused?'恢复页面刷新':'暂停页面刷新';refresh()};refresh();setInterval(refresh,2000);
+</script>
+</html>

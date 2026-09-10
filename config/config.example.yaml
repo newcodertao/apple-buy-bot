@@ -1,0 +1,44 @@
+# Example preferences only; product names/colors/date are NOT confirmed sales information.
+# Copy with `python -m src.main init`. Never save passwords, cookies or OTPs here.
+app:
+  dry_run: true
+  headless: false
+sale:
+  time: null  # Set confirmed local sale time, e.g. "2026-09-12 20:00:00"
+  timezone: Asia/Shanghai
+product:
+  model_priority: ["iPhone 18 Pro Max", "iPhone 18 Pro"]
+  capacity_priority: ["512GB", "256GB", "1TB"]
+  color_priority: ["黑色", "银色", "冰川蓝色", "勃艮第酒红色"]
+  quantity: 1
+  max_price: 15000  # CNY per unit; full checkout total must also fit quantity * max_price.
+products:
+  iphone18promax:
+    model: "iPhone 18 Pro Max"
+    platforms:
+      apple: {url: ""}  # UNKNOWN: fill only from the real official product page.
+      jd: {url: ""}
+      tmall: {url: ""}
+  iphone18pro:
+    model: "iPhone 18 Pro"
+    platforms:
+      apple: {url: ""}
+      jd: {url: ""}
+      tmall: {url: ""}
+platforms:
+  apple: {enabled: true}
+  jd: {enabled: true}
+  tmall: {enabled: true}
+monitor:
+  normal_interval: 3.0
+  warmup_interval: 1.0
+  sale_interval: 0.5
+  jitter: 0.1
+  max_retries: 5
+  backoff_max: 30.0
+  max_checks: 120
+  sale_window_seconds: 60
+order:
+  mode: race
+  auto_submit: false
+  single_order_lock: true
