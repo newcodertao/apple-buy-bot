@@ -33,6 +33,7 @@ class BrowserSession:
     page: Page
     lock: ProfileLock
     closed: asyncio.Event
+    headless: bool = False
 
 
 class BrowserManager:
@@ -53,6 +54,13 @@ class BrowserManager:
 
     async def open(self, platform: Platform) -> Page:
         return await self._open(Platform(platform), self.headless)
+
+    async def open_visible(self, platform: Platform) -> Page:
+        """An explicit manual-login window uses the same persistent profile."""
+        session = self._sessions.get(platform)
+        if session and session.headless:
+            await self.close(platform)
+        return await self._open(Platform(platform), headless=False)
 
     async def _open(self, platform: Platform, headless: bool) -> Page:
         async with self._lock:
@@ -80,7 +88,9 @@ class BrowserManager:
                 closed = asyncio.Event()
                 context.on("close", lambda _: closed.set())
                 page = context.pages[0] if context.pages else await context.new_page()
-                self._sessions[platform] = BrowserSession(context, page, profile_lock, closed)
+                self._sessions[platform] = BrowserSession(
+                    context, page, profile_lock, closed, headless
+                )
                 return page
             except BaseException as error:
                 profile_lock.release()

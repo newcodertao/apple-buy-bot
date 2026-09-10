@@ -1,6 +1,7 @@
 from datetime import datetime
 from decimal import Decimal
 from pathlib import Path
+from typing import Literal
 from urllib.parse import urlsplit
 from zoneinfo import ZoneInfo, ZoneInfoNotFoundError
 
@@ -118,6 +119,8 @@ class OrderSettings(Model):
     auto_submit: bool = False
     single_order_lock: bool = True
     mode: str = "race"
+    payment_method: Literal["installments", "wechat"] = "installments"
+    installment_bank: str = Field(default="中国建设银行", min_length=1, max_length=80)
 
     @field_validator("mode")
     @classmethod

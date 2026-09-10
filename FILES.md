@@ -1,14 +1,15 @@
-# 第一轮文件清单
+# 工程文件清单
 
 下列为工程源码、配置、说明和测试文件；不含虚拟环境、缓存、浏览器 profile、运行数据库、日志和验收输出。
 
-文件数：74
+包含本轮新增的 Apple 实页证据、公共诊断适配器和回归测试。config/config.yaml 为本地文件，已排除版本控制。
 
 ```text
 .gitignore
 config/config.example.yaml
 config/config.yaml
 data/.gitkeep
+docs/apple-live-evidence.md
 FILES.md
 logs/.gitkeep
 pyproject.toml
@@ -49,6 +50,7 @@ src/platforms/apple_cn/adapter.py
 src/platforms/apple_cn/parser.py
 src/platforms/apple_cn/selectors.py
 src/platforms/base.py
+src/platforms/inspection.py
 src/platforms/jd/__init__.py
 src/platforms/jd/adapter.py
 src/platforms/jd/parser.py
@@ -66,6 +68,7 @@ src/web/api.py
 src/web/app.py
 src/web/index.html
 tests/test_browser.py
+tests/test_apple_live_flow.py
 tests/test_checkout.py
 tests/test_cli_safety.py
 tests/test_cli_web.py
@@ -76,6 +79,7 @@ tests/test_logging.py
 tests/test_priority.py
 tests/test_regression_review.py
 tests/test_scheduler.py
+tests/test_session_control.py
 tests/test_state_machine.py
 tests/test_storage.py
 VALIDATION.md

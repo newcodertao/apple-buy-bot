@@ -42,3 +42,5 @@ order:
   mode: race
   auto_submit: false
   single_order_lock: true
+  payment_method: installments
+  installment_bank: 中国建设银行

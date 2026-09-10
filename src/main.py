@@ -13,7 +13,7 @@ from src.core.logging import redact
 from src.core.models import Platform
 
 LOGIN_URLS = {
-    Platform.APPLE: "https://www.apple.com/cn/shop/account/home",
+    Platform.APPLE: "https://secure.www.apple.com.cn/shop/account/home",
     Platform.JD: "https://passport.jd.com/new/login.aspx",
     Platform.TMALL: "https://login.tmall.com/",
 }
@@ -169,8 +169,13 @@ async def check(runtime, command, platforms):
             results[platform.value] = {"status": "BLOCKED", "reason": "No configured product URL"}
             continue
         if command == "check-login":
-            # Reading unknown status never treats a profile as proof of login.
-            results[platform.value] = {"login": (await adapter.login_status()).value}
+            if not targets:
+                results[platform.value] = {
+                    "login": "UNKNOWN",
+                    "reason": "No configured product URL",
+                }
+                continue
+            results[platform.value] = await runtime.check_login(platform)
             continue
         for _, product, url in targets:
             while True:
@@ -281,7 +286,7 @@ async def async_main(args) -> int:
                 {
                     "platform": platform.value,
                     "login": status.value,
-                    "message": "本机 profile 已保留；真实登录检测 selector 仍为 UNKNOWN",
+                    "message": "本机 profile 已保留；运行 check-login 可核实登录状态",
                 }
             )
         elif args.command == "inspect":

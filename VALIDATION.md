@@ -1,63 +1,40 @@
-# 第一轮交付验收
+# Apple 实页适配验收
 
-日期：2026-09-10（Asia/Shanghai）。目录：`D:\Apple\apple-buy-bot`。
+日期：2026-09-10（Asia/Shanghai）。本次为第二轮开发，以下区分代码测试、Chrome 会话及程序自己的会话。
 
-## 总结果
+**Apple 适配已实现；程序完整购买验收 BLOCKED，尚不能宣布可用于正式抢购。**
 
-**第一轮工程检查 PASS；真实购买验收 NOT RUN。**
+| 项目 | 结果 | 实际证据与限制 |
+|---|---|---|
+| Ruff | PASS | outputs/ruff-phase2.txt |
+| 离线与本地 Chromium 回归 | PASS：176 项，44.69 秒 | outputs/pytest-phase2.txt 和 .xml；2 条上游弃用警告，不等于官网成功 |
+| 新版 Web 状态页 | PASS（Chrome） | 正常展示 24 期免息偏好、演练保护及 SUCCESS 订单锁；桌面无整页横向溢出 |
+| 程序读取目标新品配置 | PASS | 实际读取 Pro Max / 512GB / 黑色、RMB 12,999、购买按钮不可用；outputs/apple-live-product-result.json |
+| Chrome 在售机型完整流程 | PASS | 用户手动登录、确认保存地址；iPhone 17 / 256GB / 黑色 / 1 件 / RMB 6,799；创建一笔微信待付款订单，未付款 |
+| 程序自己的在售机型加购 | BLOCKED | 显示窗口和无窗口的独立 profile 均未通过；加购跳到 Page Not Found。只读复查购物袋为空 |
+| 程序配送组件 | BLOCKED | 页面自身请求报 HTTP 541，配送控件没有加载。未判断其服务端原因；未绕过或伪造响应 |
+| 最新配送缺失保护 | 已实现 | 配送控件没有有效内容时，在任何加购动作之前暂停；本地浏览器回归断言没有加购点击 |
+| 24 期免息选择 | PASS（本地回归） | 按真实 DOM 建立银行、24 期、0% 年化利率、分期总额核验；Chrome 实页查看过该方案 |
+| 分期待付款回执 | NOT RUN | 此轮已有一笔测试单，不追加订单；未自动执行银行授权/支付 |
+| 真实账号在程序 profile 中登录及复用 | NOT RUN | 已实现登录/检查登录入口；个人 Chrome 已登录不能作为程序 profile 已认证的证据 |
+| 新品“继续”启用后的预购流程 | NOT RUN | 当前按钮禁用；未猜测下一步 |
+| 京东、天猫购买 | NOT RUN | 仍为诊断和适配接口骨架 |
+| 拥堵环境、下单速度、到货、付款 | NOT RUN | 未将历史或配置耗时作为抢购成功指标 |
 
-- Ruff：`ruff check .` → **PASS**。
-- pytest：`pytest -v`（通过虚拟环境 Python 模块执行）→ **141 passed，0 failed，0 skipped，32.35 秒**。
-- pip 依赖一致性检查 → **PASS**。
-- doctor → Python、Playwright、Chromium、配置、数据库、已填商品 URL、公共网络连接均 PASS；真实账号登录 UNKNOWN。
-- Web 六个 GET 接口均 HTTP 200，Chromium 桌面 1280×900 / 手机 375×812 无页面错误或整页横向溢出；刷新暂停/恢复正常。
-- Apple 真实商品页只读 inspect → PASS，未进行交易动作。
+既有测试单计入本机 SQLite 的 SUCCESS 订单锁。SUCCESS 表示获得订单回执，**不表示已经付款**。锁保留并阻止再下单；没有因等待时间经过而假定订单已取消。outputs 中的测试工具、profile、订单锁记录和所有现场均不进入 Git。
 
-pytest 有 2 条上游弃用提示：Starlette TestClient 的 httpx 兼容路径和 AnyIO BlockingPortal 别名。未隐藏警告，不影响这次通过结果。
+## 本轮测试范围
 
-## 原始证据
+- 商品摘要与选择的型号、容量、颜色必须一致；金额须为单一 CNY 全价，不能把月付金额视为全价。
+- 只选页面真实存在的组合；购买按钮、配送信息、购物袋数量/金额、订单总额逐步核对。
+- 分期仅接受配置银行的 24 期、0% 年化利率，总额须等于目标商品金额；订单回顾再次匹配银行及 24 个月，方案证据有时效。
+- 已保存的脱敏地址/联系方式由官网正常验证，不把空白输入框当作未填写；程序不收集联系方式明文。
+- 默认禁止提交；API 只能强制演练，不能关闭演练或开启提交。提交前再核验，点击后结果不明保留锁，禁止重放。
+- 登录入口复用同一个程序 profile；运行中的登录控制不会跳走当前购物流程；打开页面不等于认证成功。
+- 原有配置、优先级、状态机、SQLite 并发锁、跨重启不确定结果、人工恢复、节流、域名导航边界和脱敏检查仍纳入全量回归。
 
-| 文件 | 内容 |
-|---|---|
-| `outputs/ruff-final.txt` | 最终 Ruff 输出 |
-| `outputs/pytest-final.txt` | 全量逐项 pytest 输出及警告 |
-| `outputs/pytest-final.xml` | JUnit 机器可读结果 |
-| `outputs/doctor-final.json` | 依赖、数据库、profile、时钟及公共网络诊断 |
-| `outputs/web-smoke.json` | 真实本机 Web 检查结果 |
-| `outputs/web-desktop.png` / `web-mobile.png` | 目视检查过的最终页面 |
-| `outputs/web_smoke.py` | 本机只读 Web 检查复跑工具，不启动购物流程 |
-| `outputs/apple-public-inspect/20260910_120644_692287_apple_inspect.json` | 实页控件清单与脱敏文本 |
-| 同名 `.html` / `.png` / `.metadata.json` | 脱敏 DOM、布局截图、时间/URL |
-| `requirements.lock.txt` | 本次环境依赖版本 |
+## 当前阻塞的复查方法
 
-## 覆盖范围
+从本机网页打开“登录 Apple”，在程序自己的浏览器完成正常登录和官网验证，再点“检查登录”。登录仅用于保存本机会话；不能据此宣称 HTTP 541 已解决。后续必须重新进行不提交的程序路径验证，确认实际配送、购物袋和结算可用。现有订单锁不得为通过测试而清除。
 
-| 测试领域 | 已验证内容 |
-|---|---|
-| 配置 | 默认双重提交保护、URL 域/协议校验、未知/敏感配置键拒绝、非法价格/优先级/时区/频率拒绝、商品级覆盖 |
-| SKU | 型号→容量→颜色排序，未知选项/无货/错误币种/超价排除 |
-| 状态与存储 | 非法状态跃迁拒绝、记录失败不推进状态、审计持久化、六个独立 SQLite 连接只能有一个抢到锁 |
-| 订单字段 | 错 SKU/型号/容量/颜色/平台/商品/数量/币种/价格/额外商品/地址缺失/验证页面全部拒绝提交 |
-| 提交 | dry_run/auto_submit 的全部组合，配置演练不能被调用参数关闭，提交前第二次核对防止页面变化 |
-| 并发恢复 | race/parallel 只能提交一次，确认失败后另一平台继续，停止/取消/重启不造成重复提交 |
-| 不确定结果 | 提交超时、崩溃、缺少有效订单号均 UNKNOWN，锁跨重启保留，resume 不重复提交 |
-| 人工接管 | 暂停期间无继续点击；resume 重查；加购结果不明不重放；已结束 UNKNOWN 工作者仍保持浏览器直到人工停止/关闭 |
-| 锁核查 | profile 被占用时拒绝 reconcile；关闭后且人工确认无订单才清理；SUCCESS 保留 |
-| 调度与节流 | 时区、假时钟、短等待可停止、指数退避、服务端 Retry-After 秒数/HTTP-date 不提前重试 |
-| 真 Chromium | Cookie/localStorage 跨关闭重开、平台隔离、OS profile 锁、脱敏 inspect、未知选择器不点击、挑战检测、跨域重定向在请求前拒绝 |
-| 登录机制 | Enter/关闭浏览器两种保存路径使用真实本地 Chromium 验证；为了不弹窗，测试子类实际 headless，生产函数要求 visible |
-| CLI/Web | 所有请求命令解析、init 不覆盖、历史 status、无 URL 拒绝启动、重复启动/立即停止、同源/本机控制限制 |
-
-## Apple 实页边界
-
-当前页面：[选购 iPhone 18 Pro / Pro Max](https://www.apple.com.cn/shop/buy-iphone/iphone-18-pro)。本程序于 2026-09-10 12:06:44 UTC 完成只读检查，输出 21 buttons、77 links、111 role 元素、225 个含 data 属性的元素。实际 URL 和 UTC 时间保存在 metadata。
-
-已能实际使用：启动独立 Chromium profile、打开官方公开页面、读取脱敏页面结构、输出 JSON/HTML/布局截图。登录保存机制通过本地站点验收，**并未登录真实 Apple 账号**。
-
-以下选择器/语义仍全部 UNKNOWN：authenticated、model、capacity、color、price、availability、delivery、pickup、continue、add_to_bag、bag、checkout、order_review、submit_order、order_confirmation。
-
-当前 `get_skus` / `check_stock` / 选择 / 加购 / 结算 / 验单 / 提交均明确停止，没有用假数据冒充实页结果。JD、Tmall 保留相同接口骨架，真实页面未验收。真实下单速度、开售拥堵、送达时间及成功率均 NOT RUN。
-
-## 下一步
-
-先执行 Phase 2：根据当前真实 Apple 页面，逐项建立有日期证据的选择器与完整 SKU/订单解析，再进行用户本机登录及不提交的购物袋/结算验收。通过之前，继续保持 `dry_run=true`、`auto_submit=false`。之后才进入 JD/Tmall 真实适配。
+选择器证据及仍未知的分支见 [实页记录](docs/apple-live-evidence.md)。第一轮 141 项工程检查属于历史基线；最新结果以上表及本轮测试文件为准。

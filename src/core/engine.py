@@ -58,6 +58,8 @@ class Engine:
             "dry_run": self._dry_run,
             "auto_submit": self.config.order.auto_submit,
             "mode": self.config.order.mode,
+            "payment_method": self.config.order.payment_method,
+            "installment_bank": self.config.order.installment_bank,
             "order_guard": self.order_lock.status(),
             "platforms": {p.value: s.model_dump(mode="json") for p, s in self._status.items()},
         }
@@ -137,7 +139,10 @@ class Engine:
                 login = await self._call(platform, "login_status")
                 self._status[platform].login = login
                 verification = await self._call(platform, "detect_verification")
-                if login != LoginStatus.AUTHENTICATED or verification.required:
+                if (
+                    self._login_required(platform, next_state)
+                    and login != LoginStatus.AUTHENTICATED
+                ) or verification.required:
                     await self._notify("human_required", "登录或安全验证仍未完成", platform)
                     continue
             except (HumanRequired, RetryableError):
@@ -147,12 +152,18 @@ class Engine:
             return
         raise asyncio.CancelledError
 
+    def _login_required(self, platform: Platform, state: State) -> bool:
+        return state not in getattr(self.adapters[platform], "public_states", ())
+
     async def _ensure_clear(self, platform: Platform, next_state: State) -> None:
         while True:
             try:
                 login = await self._call(platform, "login_status")
                 self._status[platform].login = login
-                if login != LoginStatus.AUTHENTICATED:
+                if (
+                    self._login_required(platform, next_state)
+                    and login != LoginStatus.AUTHENTICATED
+                ):
                     raise HumanRequired("Login is required or unknown")
                 verification = await self._call(platform, "detect_verification")
                 if verification.required:
@@ -357,6 +368,9 @@ class Engine:
                         )
                     candidates = rank_skus(skus, self.config.preferences_for(product_id))
                     status.stock = bool(candidates)
+                    if skus and not candidates:
+                        status.sku = skus[0]
+                        status.result = skus[0].delivery or "没有符合配置的可购买 SKU"
                     if candidates:
                         status.sku = candidates[0]
                         self._transition(platform, State.STOCK_FOUND)

@@ -1,6 +1,6 @@
 # apple-buy-bot
 
-面向 Apple 中国大陆官网、京东和天猫官方渠道的本机购买辅助工程。当前交付的是**第一轮工程与可测试的执行框架**：CLI、FastAPI、持久化浏览器、调度、状态机、SKU 排序和订单保护已实现；Apple 实页 inspect 已运行，真实登录判断与购买动作仍为 `UNKNOWN`，**不能将本版本作为已验收的抢购程序使用**。
+面向 Apple 中国大陆官网、京东和天猫官方渠道的本机购买辅助工程。当前正在完成 **Apple 实页适配**：已实现商品配置、可购买状态识别、购物袋核对、结算步骤、24 期免息选择、订单核验和单次提交。Chrome 已通过一笔在售机型的真实待付款订单验证；这与程序全流程验收是两项证据，详见 [验收记录](VALIDATION.md)。目标新品开售及拥堵环境尚未验收，JD/Tmall 仍为后续阶段。
 
 所有最终支付由用户手动完成。没有验证码识别、滑块破解、短信/人脸/设备验证绕过、隐身插件、代理轮换、批量账号或私有下单接口。
 
@@ -14,7 +14,7 @@ Set-Location 'D:\Apple\apple-buy-bot'
 & .\.venv\Scripts\python.exe -m src.main web
 ```
 
-打开 <http://127.0.0.1:8765> 查看状态。Web 服务不自动开始购物操作，点击“启动”才按配置运行。默认配置是 `dry_run: true`、`auto_submit: false`；即使调用方传入 `dry_run=False`，也不能关闭配置中的演练保护。网页/API 不能修改这两个开关。
+打开 <http://127.0.0.1:8765> 查看状态。“登录 Apple”打开程序自己的浏览器，登录后点击“检查登录”；以后复用该本机 profile。“按计划启动”按配置运行，“立即演练”跳过等待并强制禁止提交。默认仍是 `dry_run: true`、`auto_submit: false`，网页/API 无法关闭演练保护或开启自动提交。
 
 新环境安装：
 
@@ -35,17 +35,19 @@ python -m venv .venv
 |---|---|---|
 | 配置、状态机、SKU 排序、SQLite、调度 | PASS | 本机单元/回归测试 |
 | Chromium persistent profile | PASS | 本地测试站 Cookie/localStorage 关闭后重开仍存在，平台相互隔离 |
-| 手动登录入口 | PASS（机制） | Enter/关闭窗口保存路径均测试；未登录真实账号 |
+| 手动登录入口 | PASS（机制） | CLI 和网页共用程序 profile；Chrome 的个人 profile 与程序 profile 分开 |
 | Apple 官方商品页 inspect | PASS（实页） | `outputs/apple-public-inspect/` 内 JSON、脱敏 HTML、布局 PNG、metadata |
-| Apple 认证、SKU、库存、加购、结算、提交 | UNKNOWN / NOT RUN | 选择器没有实页交易验收；调用将停止并转人工 |
+| Apple 商品配置与价格 | PASS（程序实页） | Pro Max 黑色 512GB，页面价格与购买按钮状态均读取实际 DOM |
+| Apple 登录、购物袋、结算、微信待付款回执 | PASS（Chrome 实页） | 当前在售机型完成一次正常流程；程序独立路径的结果见 VALIDATION |
+| 24 期免息 | 已实现，回执待验收 | 验证银行、24 期、0% 年化利率及总额；不自动批准银行付款 |
 | JD / Tmall | 骨架 | 共用接口及诊断机制；购买选择器为 UNKNOWN，未实页验收 |
 | race / parallel 执行 | PASS（模拟） | FakeAdapter 并发测试，不代表平台购买成功 |
 | FastAPI / 本机状态页 | PASS | API 测试与真实 Chromium 桌面/手机视口检查 |
-| 真实订单、支付、到货 | NOT RUN | 本轮没有加购、结算、创建真实订单或支付 |
+| 真实待付款订单 | PASS（Chrome） | 用户授权后创建一笔测试单；付款、到货均 NOT RUN |
 
 2026-09-10 实际通过本程序检查了 [Apple iPhone 18 Pro / Pro Max 商品页](https://www.apple.com.cn/shop/buy-iphone/iphone-18-pro)。本次快照中有 21 个按钮、77 个链接、111 个 role 元素和 225 个含 data 属性的元素。这是页面结构证据，不是控件可点击/交易成功的证明。
 
-页面当时标注 9 月 12 日晚 8 点接受预购，因此**本地** `config/config.yaml` 已填入该时间和同一产品系列的 Apple URL；`config.example.yaml` 仍留空 URL 和时间，避免把一次观察作为永久默认值。使用前应重新查看官方页面。京东、天猫 URL 仍为空。没有沿用历史 iPhone 17 的选择器或速度结论。
+页面当时标注 9 月 12 日晚 8 点接受预购，因此**本地** `config/config.yaml` 已填入该时间和同一产品系列的 Apple URL；`config.example.yaml` 仍留空 URL 和时间。使用前应重新查看官方页面。京东、天猫 URL 仍为空。选择器证据见 [Apple 实页记录](docs/apple-live-evidence.md)，没有将历史速度作为抢购性能指标。
 
 ## 目录与职责
 
@@ -101,9 +103,9 @@ python -m src.main --headless inspect apple https://www.apple.com.cn/shop/buy-ip
 
 `--config PATH` 与 `--headless` 是全局参数，放在子命令前。自定义配置按 `项目根/config/文件.yaml` 放置，运行目录始终锚定配置父目录的上一级，不随 shell 当前目录变化。`init` 不覆盖已有配置。
 
-`login` 必须由你在显示出的 Chromium 中完成；按 Enter 或关闭窗口后保存 profile。程序不收集密码/验证码，不导出 Cookie，也不因为 profile 存在就报告“登录成功”。本阶段 `check-login` 返回 UNKNOWN，需要 Phase 2 补上经过确认的认证判断。
+`login` 由你在显示出的 Chromium 中完成；按 Enter 或关闭窗口后保存 profile。也可在网页点击“登录 Apple”。程序不收集密码/验证码，不导出 Cookie；`check-login` 打开当前商品并通过官网的退出登录入口核实认证。首次登录一次，过期或安全验证时再人工处理。
 
-`run` 使用本机系统时间等待 T−10 分钟准备、T−3 分钟打开商品、T−30 秒复查、T−5 秒就绪、T=0 监测。`dry-run` 与 `run --now` 跳过等待；只有 `dry-run` 强制禁止最终提交。UNKNOWN 认证或选择器会停在 `WAITING_HUMAN`，因此当前真实 Apple 演练不会到达购物袋/结算。
+`run` 使用本机系统时间等待 T−10 分钟准备、T−3 分钟打开商品、T−30 秒复查、T−5 秒就绪、T=0 监测。`dry-run` 与 `run --now` 跳过等待；只有 `dry-run` 强制禁止最终提交。Apple 公共商品配置和加购不强制预先登录；实际登录页和订单核验阶段必须确认认证，未知页面或验证会转人工。
 
 运行控制台输入 `resume [apple|jd|tmall]`、`status` 或 `stop`。验证期间浏览器保持打开，恢复后先重新检查登录/验证状态。提交结果 UNKNOWN 不可通过 resume 再次提交：先人工核查订单历史。出现验证的 inspect 同样等待人工，并在 resume 时只检查现有页面。
 
@@ -114,6 +116,10 @@ python -m src.main --headless inspect apple https://www.apple.com.cn/shop/buy-ip
 全局 `product` 给出型号、容量、颜色的优先顺序及数量、单价上限。每个 `products.<id>` 可覆盖容量、颜色、数量和价格，且型号须存在于全局型号优先级中。平台 URL 在每个商品下配置，`platforms.<platform>.enabled` 控制启用。
 
 排序为型号 → 容量 → 颜色的字典序。示例中 512GB 黑色优于 512GB 银色，后者优于 256GB 黑色。未列出的选项、未知/不可用库存、非 CNY、超价 SKU 均排除。一个平台的多个型号按优先级轮流检查，单个页面不会被多个协程同时操作。
+
+Apple 逐个选择配置并读取最终商品摘要，不推算完整 SKU 笛卡尔积。`available` 表示当前页面购买按钮可用，不保证最终下单成功；配送详情未加载时会明确标注，并在加购前暂停，结算还须再次核对。候选搜索最多 64 个组合，找到首个符合价格和按钮条件的组合后停止本轮搜索。
+
+付款默认 `order.payment_method: installments`、`order.installment_bank: 中国建设银行`，按本次用户偏好设置。仅接受明确显示 24 期、0% 年化利率且总额与商品金额一致的方案；缺失时暂停，不静默改用有息分期或一次性付款。也可显式配置 `wechat`，创建订单后人工扫码；银行/微信付款操作均不自动执行。
 
 最终提交需要全部成立：
 
@@ -147,12 +153,12 @@ data、logs、screenshots、outputs、config.yaml 已在 `.gitignore` 排除，�
 
 ## Web API
 
-GET：`/status`、`/platforms`、`/products`、`/events?limit=100`、`/orders?limit=100`、`/health`。POST：`/start`（JSON `{}` 或 platforms/immediate）、`/stop`、`/resume`（JSON `{}` 或 platform）。接口说明在 `/docs`。
+GET：`/status`、`/platforms`、`/products`、`/events?limit=100`、`/orders?limit=100`、`/health`。POST：`/start`（platforms/immediate，可传 `dry_run:true` 强制演练）、`/stop`、`/resume`、`/login`、`/check-login`（后三者可传 platform）。接口说明在 `/docs`。接口拒绝密码或 Token 等额外字段。
 
 控制 POST 必须带 `X-Apple-Bot-Control: local`；拒绝跨站 Origin 和非本机 Host，默认只监听 `127.0.0.1:8765`。网页自动刷新只是读取本机状态，每 2 秒一次；可暂停，不会产生商品请求。不得把当前本机控制接口直接转发到公网。
 
 ## 下一阶段
 
-按照你的开发顺序，先把 Apple 做完整：通过真实页面检查确定登录证明、SKU 控件与组合、库存/配送/取货含义，再逐步验证选择 → 购物袋 → 结算。每一步都补本地 fixture 与不提交的实页验收，核对全部订单字段，最后才评估提交动作。第一阶段选择器全部明确 UNKNOWN，不能仅凭网页文本或一次点击把它们改成“有效”。之后再开发 JD、Tmall 的真实购买流程。
+继续完成程序自己的持久化浏览器全流程验收、24 期分期订单回执验证，以及新品开售后“继续”分支的实测，再进入 JD/Tmall 适配。已创建的待付款测试单和不明结果都计入订单保护，不自动重试或清锁。
 
 技术参考：[Playwright persistent context](https://playwright.dev/python/docs/api/class-browsertype#browser-type-launch-persistent-context)、[Pydantic models](https://docs.pydantic.dev/latest/concepts/models/)、[Chromium Fetch 导航检查](https://chromedevtools.github.io/devtools-protocol/tot/Fetch/)。

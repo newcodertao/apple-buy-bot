@@ -1,8 +1,8 @@
 from src.core.models import Platform
-from src.platforms.apple_cn.adapter import AppleCNAdapter
+from src.platforms.inspection import InspectionAdapter
 
 
-class TmallAdapter(AppleCNAdapter):
+class TmallAdapter(InspectionAdapter):
     """Explicit Phase 5 placeholder; all transaction selectors are UNKNOWN."""
 
     platform = Platform.TMALL

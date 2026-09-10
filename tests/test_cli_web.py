@@ -66,6 +66,11 @@ def test_web_reads_and_control_boundary(tmp_path):
         headers = {"X-Apple-Bot-Control": "local"}
         assert client.post("/start", json={}, headers=headers).status_code == 409
         assert client.post("/start", json={"auto_submit": True}, headers=headers).status_code == 422
+        assert client.post("/start", json={"dry_run": False}, headers=headers).status_code == 422
+        assert (
+            client.post("/login", json={"password": "test-only"}, headers=headers).status_code
+            == 422
+        )
         assert client.post("/resume", json={}, headers=headers).status_code == 409
         assert client.post("/stop", headers=headers).status_code == 200
         assert client.get("/events?limit=10001").status_code == 422

@@ -1,8 +1,8 @@
 from src.core.models import Platform
-from src.platforms.apple_cn.adapter import AppleCNAdapter
+from src.platforms.inspection import InspectionAdapter
 
 
-class JDAdapter(AppleCNAdapter):
+class JDAdapter(InspectionAdapter):
     """Explicit Phase 4 placeholder; all transaction selectors are UNKNOWN."""
 
     platform = Platform.JD
