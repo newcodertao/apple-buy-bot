@@ -10,6 +10,7 @@ config/config.example.yaml
 config/config.yaml
 data/.gitkeep
 docs/apple-live-evidence.md
+docs/marketplace-integration-design.md
 FILES.md
 logs/.gitkeep
 pyproject.toml

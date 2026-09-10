@@ -160,6 +160,8 @@ GET：`/status`、`/platforms`、`/products`、`/events?limit=100`、`/orders?li
 
 ## 下一阶段
 
+淘宝、天猫、京东的接入方案见 [多平台接入设计](docs/marketplace-integration-design.md)。该文档是设计，实际渠道能力仍以逐阶段实页验收为准。
+
 继续完成程序自己的持久化浏览器全流程验收、24 期分期订单回执验证，以及新品开售后“继续”分支的实测，再进入 JD/Tmall 适配。已创建的待付款测试单和不明结果都计入订单保护，不自动重试或清锁。
 
 技术参考：[Playwright persistent context](https://playwright.dev/python/docs/api/class-browsertype#browser-type-launch-persistent-context)、[Pydantic models](https://docs.pydantic.dev/latest/concepts/models/)、[Chromium Fetch 导航检查](https://chromedevtools.github.io/devtools-protocol/tot/Fetch/)。
