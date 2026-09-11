@@ -17,6 +17,7 @@ from src.core.exceptions import ConfigurationError, HumanRequired, RetryableErro
 from src.core.models import LoginStatus, Platform
 from src.platforms.apple_cn.adapter import AppleCNAdapter
 from src.platforms.jd.adapter import JDAdapter
+from src.platforms.taobao.adapter import TaobaoAdapter
 from src.platforms.tmall.adapter import TmallAdapter
 
 pytestmark = pytest.mark.browser
@@ -210,7 +211,7 @@ async def test_redacted_inspection_inventory_html_and_screenshot(tmp_path, local
 
 
 @pytest.mark.asyncio
-@pytest.mark.parametrize("adapter_type", [AppleCNAdapter, JDAdapter, TmallAdapter])
+@pytest.mark.parametrize("adapter_type", [AppleCNAdapter, JDAdapter, TmallAdapter, TaobaoAdapter])
 async def test_unknown_commerce_selectors_stop_without_clicking(tmp_path, adapter_type):
     manager = BrowserManager(tmp_path / "profiles", headless=True)
     adapter = adapter_type(manager, tmp_path / "screenshots")

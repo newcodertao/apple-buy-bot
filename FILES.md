@@ -2,7 +2,7 @@
 
 下列为工程源码、配置、说明和测试文件；不含虚拟环境、缓存、浏览器 profile、运行数据库、日志和验收输出。
 
-包含本轮新增的 Apple 实页证据、公共诊断适配器和回归测试。config/config.yaml 为本地文件，已排除版本控制。
+包含 Apple 与市场平台的实页证据、共用会话、交易核对及功能测试。config/config.yaml 为本地文件，已排除版本控制。
 
 ```text
 .gitignore
@@ -11,6 +11,7 @@ config/config.yaml
 data/.gitkeep
 docs/apple-live-evidence.md
 docs/marketplace-integration-design.md
+docs/marketplace-live-evidence.md
 FILES.md
 logs/.gitkeep
 pyproject.toml
@@ -20,6 +21,7 @@ requirements.txt
 screenshots/.gitkeep
 src/__init__.py
 src/browser/__init__.py
+src/browser/groups.py
 src/browser/inspection.py
 src/browser/manager.py
 src/browser/session.py
@@ -52,10 +54,15 @@ src/platforms/apple_cn/parser.py
 src/platforms/apple_cn/selectors.py
 src/platforms/base.py
 src/platforms/inspection.py
+src/platforms/marketplace.py
 src/platforms/jd/__init__.py
 src/platforms/jd/adapter.py
 src/platforms/jd/parser.py
 src/platforms/jd/selectors.py
+src/platforms/taobao/__init__.py
+src/platforms/taobao/adapter.py
+src/platforms/taobao/parser.py
+src/platforms/taobao/selectors.py
 src/platforms/tmall/__init__.py
 src/platforms/tmall/adapter.py
 src/platforms/tmall/parser.py
@@ -77,6 +84,10 @@ tests/test_config.py
 tests/test_engine.py
 tests/test_inspect_cli.py
 tests/test_logging.py
+tests/test_marketplace_contracts.py
+tests/test_marketplace_engine.py
+tests/test_marketplace_flow.py
+tests/test_marketplace_judgments.py
 tests/test_priority.py
 tests/test_regression_review.py
 tests/test_scheduler.py
@@ -86,5 +97,5 @@ tests/test_storage.py
 VALIDATION.md
 ```
 
-运行时数据：data/database.db、data/profiles/{apple,jd,tmall}/、logs/、screenshots/。
+运行时数据：data/database.db、data/profiles/{apple,jd,tmall}/、logs/、screenshots/。淘宝与天猫共用 tmall 会话目录。
 验收证据：outputs/，索引详见 VALIDATION.md。

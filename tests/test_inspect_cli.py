@@ -1,7 +1,7 @@
 import asyncio
 import json
 from types import SimpleNamespace
-from unittest.mock import AsyncMock
+from unittest.mock import AsyncMock, Mock
 
 from src.core.models import Platform, Verification
 from src.main import inspect_page
@@ -17,6 +17,7 @@ async def test_inspect_keeps_challenge_open_and_only_rechecks_after_resume(tmp_p
         detect_verification=AsyncMock(side_effect=[Verification(required=True), Verification()]),
     )
     runtime = SimpleNamespace(
+        _require_session_idle=Mock(),
         adapters={Platform.APPLE: adapter},
         manager=SimpleNamespace(current_page=lambda _: object()),
     )
@@ -37,5 +38,5 @@ async def test_inspect_normal_page_finishes_without_input(tmp_path):
     inventory = tmp_path / "inspect.json"
     inventory.write_text(json.dumps({"metadata": {"state": ""}}))
     adapter = SimpleNamespace(inspect=AsyncMock(return_value=inventory))
-    runtime = SimpleNamespace(adapters={Platform.APPLE: adapter})
+    runtime = SimpleNamespace(adapters={Platform.APPLE: adapter}, _require_session_idle=Mock())
     await inspect_page(runtime, Platform.APPLE, "https://www.apple.com", tmp_path)

@@ -5,9 +5,10 @@ import logging
 from datetime import UTC, datetime
 from time import perf_counter
 
+from src.browser.groups import session_key
 from src.core.config import AppConfig
 from src.core.exceptions import HumanRequired, OrderRejected, RetryableError
-from src.core.logging import safe_url
+from src.core.logging import redact, safe_url
 from src.core.models import SKU, LoginStatus, Platform, PlatformStatus, State
 from src.core.scheduler import Scheduler, backoff
 from src.core.state_machine import StateMachine
@@ -21,6 +22,16 @@ from src.platforms.base import PlatformAdapter
 from src.storage.database import Database
 
 UNCERTAIN = {"SUBMITTING", "UNKNOWN", "SUCCESS"}
+
+
+def _failure_reason(error: Exception) -> str:
+    if isinstance(error, HumanRequired) and str(error):
+        return redact(str(error))
+    return type(error).__name__
+
+
+class PurchaseTaken(Exception):
+    """Another workflow owns the global order; stop without another browser action."""
 
 
 class Engine:
@@ -42,7 +53,8 @@ class Engine:
         self._status = {p: PlatformStatus(platform=p) for p in adapters}
         self._machines: dict[Platform, StateMachine] = {}
         self._tasks: list[asyncio.Task] = []
-        self._active_platforms: set[Platform] = set()
+        self._session_holds: dict[str, dict] = {}
+        self._owner_channels: dict[str, Platform] = {}
         self._guard_changed = asyncio.Event()
         self._dry_run = config.app.dry_run
         self._sale_time = config.sale.target()
@@ -61,6 +73,12 @@ class Engine:
             "payment_method": self.config.order.payment_method,
             "installment_bank": self.config.order.installment_bank,
             "order_guard": self.order_lock.status(),
+            "session_holds": {
+                key: hold
+                for platform in self.adapters
+                if (hold := self.session_hold(platform))
+                for key in (session_key(platform),)
+            },
             "platforms": {p.value: s.model_dump(mode="json") for p, s in self._status.items()},
         }
 
@@ -70,6 +88,9 @@ class Engine:
         if machine.state != state:
             machine.transition(state, sku_id=status.sku.id if status.sku else "", message=message)
         status.state = state
+        hold = self._session_holds.get(session_key(platform))
+        if hold and hold["active_channel"] == platform.value:
+            hold["reason"] = state.value
         if message:
             status.result = message
         changed, self._guard_changed = self._guard_changed, asyncio.Event()
@@ -77,6 +98,35 @@ class Engine:
         logging.getLogger(platform.value).info(
             "platform=%s state=%s action=transition message=%s", platform, state, message
         )
+
+    def session_hold(self, platform: Platform) -> dict | None:
+        """Report ownership even after an unpaid/uncertain workflow task has ended."""
+        key = session_key(platform)
+        guard = self.order_lock.status()
+        if guard:
+            owner = guard.get("owner", "")
+            channel = self._owner_channels.get(owner)
+            if channel is None:
+                # Read legacy run_id:platform owners without rewriting persisted rows.
+                channel = next(
+                    (candidate for candidate in Platform if owner.endswith(":" + candidate.value)),
+                    None,
+                )
+            if channel is None or session_key(channel) == key:
+                return {
+                    "active_channel": channel.value if channel else "unknown",
+                    "reason": guard.get("status", "UNKNOWN"),
+                }
+        hold = self._session_holds.get(key)
+        return dict(hold) if hold else None
+
+    def _check_guard(self, platform: Platform) -> None:
+        guard = self.order_lock.status()
+        if guard and (
+            guard.get("owner") != self._owner(platform)
+            or guard.get("status") in {"SUCCESS", "UNKNOWN"}
+        ):
+            raise PurchaseTaken
 
     async def _notify(self, event: str, message: str, platform: Platform | None = None) -> None:
         try:
@@ -93,6 +143,7 @@ class Engine:
     async def _call(self, platform: Platform, name: str, *args):
         if self._stop.is_set():
             raise asyncio.CancelledError
+        self._check_guard(platform)
         started = perf_counter()
         result, exception = "ok", ""
         try:
@@ -131,7 +182,19 @@ class Engine:
         await self._capture(platform, "human_required")
         await self._notify("human_required", "需要人工操作；处理后输入 resume", platform)
         while not self._stop.is_set():
-            await event.wait()
+            self._check_guard(platform)
+            waiters = [
+                asyncio.create_task(event.wait()),
+                asyncio.create_task(self._guard_changed.wait()),
+            ]
+            try:
+                await asyncio.wait(waiters, return_when=asyncio.FIRST_COMPLETED)
+            finally:
+                for waiter in waiters:
+                    waiter.cancel()
+                await asyncio.gather(*waiters, return_exceptions=True)
+            if not event.is_set():
+                continue
             event.clear()
             if self._stop.is_set():
                 raise asyncio.CancelledError
@@ -170,7 +233,7 @@ class Engine:
                     raise HumanRequired("Security verification requires human action")
                 return
             except HumanRequired as exc:
-                await self._pause(platform, next_state, type(exc).__name__)
+                await self._pause(platform, next_state, _failure_reason(exc))
 
     async def _action(self, platform: Platform, state: State, name: str, *args) -> None:
         self._transition(platform, state)
@@ -182,7 +245,7 @@ class Engine:
             except (HumanRequired, RetryableError, TimeoutError, ConnectionError) as exc:
                 # Repeating an ambiguous cart click could increase quantity. The user
                 # checks the cart; resume continues to checkout and verifies its total.
-                await self._pause(platform, state, type(exc).__name__)
+                await self._pause(platform, state, _failure_reason(exc))
                 if name == "add_to_cart":
                     return
 
@@ -193,45 +256,28 @@ class Engine:
             try:
                 await self._ensure_clear(platform, State.VERIFYING)
                 review = await self._call(platform, "verify_order")
-                verify_checkout(review, sku, preferences)
+                if platform == Platform.APPLE:
+                    verify_checkout(review, sku, preferences)
+                else:
+                    verify_checkout(
+                        review,
+                        sku,
+                        preferences,
+                        target=self.config.products[sku.product_id].platforms[platform],
+                        order_policy=self.config.order,
+                    )
                 verification = await self._call(platform, "detect_verification")
                 if verification.required:
                     raise HumanRequired("Verification appeared during checkout review")
                 return review
             except (HumanRequired, RetryableError, TimeoutError, ConnectionError) as exc:
-                await self._pause(platform, State.VERIFYING, type(exc).__name__)
+                await self._pause(platform, State.VERIFYING, _failure_reason(exc))
 
     def _owner(self, platform: Platform) -> str:
         return f"{self.run_id}:{platform.value}"
 
-    async def _wait_for_guard(self, platform: Platform) -> bool:
-        """Wait without browser activity while another live workflow owns the order."""
-        while not self._stop.is_set():
-            guard = self.order_lock.status()
-            if not guard or guard.get("owner") == self._owner(platform):
-                return True
-            if guard.get("status") in {"SUCCESS", "UNKNOWN"}:
-                return False
-            if not guard.get("owner", "").startswith(f"{self.run_id}:"):
-                return False
-            owner_platform = guard["owner"].rsplit(":", 1)[-1]
-            if owner_platform not in self._active_platforms:
-                return False
-            if guard.get("status") == "CLAIMED" and (
-                self._dry_run or not self.config.order.auto_submit
-            ):
-                return False
-            event = self._guard_changed
-            await event.wait()
-        return False
-
     async def _claim(self, platform: Platform) -> bool:
-        while not self._stop.is_set():
-            if self.order_lock.acquire(self._owner(platform)):
-                return True
-            if not await self._wait_for_guard(platform):
-                return False
-        return False
+        return not self._stop.is_set() and self.order_lock.acquire(self._owner(platform))
 
     async def _purchase(self, platform: Platform, sku: SKU) -> None:
         preferences = self.config.preferences_for(sku.product_id)
@@ -242,18 +288,20 @@ class Engine:
         await self._action(platform, State.CHECKOUT, "goto_checkout")
         await self._capture(platform, "checkout")
         await self._notify("checkout", "已进入结算，正在核对订单", platform)
-        await self._review(platform, sku)
+        review = await self._review(platform, sku)
         owner = self._owner(platform)
         if not await self._claim(platform):
             self._transition(platform, State.STOPPED, "Another order owns the purchase reservation")
             return
         self._transition(platform, State.READY_TO_SUBMIT, "Checkout verified; purchase reserved")
         if self._dry_run or not self.config.order.auto_submit:
-            self.database.record_order(self.run_id, sku, "READY_TO_SUBMIT", "Submission disabled")
+            self.database.record_order(
+                self.run_id, sku, "READY_TO_SUBMIT", "Submission disabled", review=review
+            )
             await self._notify("ready", "订单已核对；提交开关关闭，未下单", platform)
             return
         # Both switches are checked again after a fresh complete checkout review.
-        await self._review(platform, sku)
+        review = await self._review(platform, sku)
         guard = self.order_lock.status()
         if not guard or guard.get("owner") != owner or guard.get("status") != "CLAIMED":
             self._transition(platform, State.STOPPED, "Purchase reservation is no longer valid")
@@ -270,11 +318,15 @@ class Engine:
         except OrderRejected:
             self.order_lock.mark_submission(owner, "REJECTED")
             self.order_lock.release(owner)
-            self.database.record_order(self.run_id, sku, "REJECTED", "Confirmed rejection")
+            self.database.record_order(
+                self.run_id, sku, "REJECTED", "Confirmed rejection", review=review
+            )
             raise
         except (Exception, asyncio.CancelledError) as exc:
             self.order_lock.mark_submission(owner, "UNKNOWN")
-            self.database.record_order(self.run_id, sku, "UNKNOWN", type(exc).__name__)
+            self.database.record_order(
+                self.run_id, sku, "UNKNOWN", type(exc).__name__, review=review
+            )
             self._transition(
                 platform, State.WAITING_HUMAN, "Submission outcome UNKNOWN; do not resubmit"
             )
@@ -283,20 +335,34 @@ class Engine:
             return
         if result.status == "SUCCESS" and result.order_id and result.order_id.strip():
             self.order_lock.mark_submission(owner, "SUCCESS")
-            self.database.record_order(
-                self.run_id, sku, "SUCCESS", "Confirmed order identifier received"
-            )
             self._transition(platform, State.SUCCESS, "Order confirmed; payment remains manual")
+            self.database.record_order(
+                self.run_id,
+                sku,
+                "SUCCESS",
+                "Confirmed order identifier received",
+                review=review,
+                result=result,
+            )
             await self._capture(platform, "success")
             await self._notify("success", "订单已确认；请人工完成支付", platform)
         elif result.status == "REJECTED":
             self.order_lock.mark_submission(owner, "REJECTED")
             self.order_lock.release(owner)
-            self.database.record_order(self.run_id, sku, "REJECTED", "Confirmed rejection")
+            self.database.record_order(
+                self.run_id, sku, "REJECTED", "Confirmed rejection", review=review, result=result
+            )
             raise OrderRejected("Confirmed rejection")
         else:
             self.order_lock.mark_submission(owner, "UNKNOWN")
-            self.database.record_order(self.run_id, sku, "UNKNOWN", "No conclusive order result")
+            self.database.record_order(
+                self.run_id,
+                sku,
+                "UNKNOWN",
+                "No conclusive order result",
+                review=review,
+                result=result,
+            )
             self._transition(
                 platform, State.WAITING_HUMAN, "Submission outcome UNKNOWN; do not resubmit"
             )
@@ -310,13 +376,15 @@ class Engine:
             raise asyncio.CancelledError
         # Opening a page gives a fresh persistent context a visible place to log in.
         await self._call(platform, "open_product", product_id, url)
+        opened_at = perf_counter()
         await self._capture(platform, "product_open")
         await self._ensure_clear(platform, State.PREPARING)
         self._transition(platform, State.WAITING, "Waiting for T-3min product preparation")
         if not await scheduler.wait_until(-180):
             raise asyncio.CancelledError
-        await self._call(platform, "open_product", product_id, url)
-        await self._capture(platform, "product_open")
+        if platform == Platform.APPLE or perf_counter() - opened_at >= self._interval(platform):
+            await self._call(platform, "open_product", product_id, url)
+            await self._capture(platform, "product_open")
         if not await scheduler.wait_until(-30):
             raise asyncio.CancelledError
         await self._ensure_clear(platform, State.WAITING)
@@ -326,34 +394,46 @@ class Engine:
         if not await scheduler.wait_until(0):
             raise asyncio.CancelledError
 
-    async def _worker(self, platform: Platform, targets: list[tuple[str, str]]) -> None:
-        status = self._status[platform]
-        index, checks, retries = 0, 0, 0
-        owner = self._owner(platform)
+    def _interval(self, platform: Platform) -> float:
+        interval = polling_interval(self.config.monitor, self._sale_time)
+        if platform != Platform.APPLE:
+            interval = max(interval, self.config.platforms[platform].refresh_interval)
+        return interval
+
+    async def _worker(self, channels: dict[Platform, list[tuple[str, str]]]) -> None:
+        """One task owns the page; only a completed stock check may yield to a peer."""
+        queue = list(channels)
+        progress = {
+            platform: {"index": 0, "checks": 0, "retries": 0, "prepared": False}
+            for platform in channels
+        }
+        platform = queue[0]
+        key = session_key(platform)
         try:
-            while checks < self.config.monitor.max_checks and not self._stop.is_set():
-                product_id, url = targets[index % len(targets)]
+            while queue and not self._stop.is_set():
+                platform = queue.pop(0)
+                status = self._status[platform]
+                current = progress[platform]
+                targets = channels[platform]
+                owner = self._owner(platform)
+                self._session_holds[key] = {
+                    "active_channel": platform.value,
+                    "reason": status.state.value,
+                }
+                product_id, url = targets[current["index"] % len(targets)]
                 status.product_id = product_id
                 self._machines[platform].product_id = product_id
+                delay = self._interval(platform)
                 try:
-                    guard = self.order_lock.status()
-                    if (
-                        guard
-                        and guard.get("owner") != owner
-                        and (self.config.order.mode == "race" or guard.get("status") in UNCERTAIN)
-                    ):
-                        if not await self._wait_for_guard(platform):
-                            self._transition(
-                                platform, State.STOPPED, "Another platform reserved the purchase"
-                            )
-                            return
-                    if checks == 0 and retries == 0:
+                    self._check_guard(platform)
+                    if not current["prepared"]:
+                        current["prepared"] = True
                         await self._prepare(platform, product_id, url)
                     else:
                         self._transition(platform, State.MONITORING)
-                        await self._ensure_clear(platform, State.MONITORING)
                         await self._call(platform, "open_product", product_id, url)
-                    checks += 1
+                        await self._ensure_clear(platform, State.MONITORING)
+                    current["checks"] += 1
                     skus = await self._call(platform, "check_stock")
                     status.last_check = datetime.now(UTC)
                     for sku in skus:
@@ -378,55 +458,77 @@ class Engine:
                         await self._notify("stock", "检测到符合配置的库存", platform)
                         await self._purchase(platform, candidates[0])
                         return
-                    index += 1
-                    if checks < self.config.monitor.max_checks:
-                        await wait_or_stop(
-                            self._stop, polling_interval(self.config.monitor, self._sale_time)
-                        )
+                    current["index"] += 1
+                    if current["checks"] < self.config.monitor.max_checks:
+                        queue.append(platform)
+                    else:
+                        self._transition(platform, State.FAILED, "Stock check limit reached")
                 except HumanRequired as exc:
-                    await self._pause(platform, State.MONITORING, type(exc).__name__)
+                    await self._pause(platform, State.MONITORING, _failure_reason(exc))
                     # Human pauses do not create unbounded automatic request retries.
-                    retries += 1
-                except (RetryableError, OrderRejected, TimeoutError, ConnectionError) as exc:
+                    current["retries"] += 1
+                    status.retries = current["retries"]
+                    if current["checks"] < self.config.monitor.max_checks:
+                        queue.insert(0, platform)
+                    else:
+                        self._transition(platform, State.FAILED, "Stock check limit reached")
+                except OrderRejected:
+                    # An explicit rejection releases only this confirmed attempt. Do not
+                    # replay the cart or submit in the same run to try again.
+                    self._transition(platform, State.FAILED, "Order rejected; no automatic replay")
+                    await self._notify("failed", "订单被明确拒绝，本轮不重复下单", platform)
+                except (RetryableError, TimeoutError, ConnectionError) as exc:
                     guard = self.order_lock.status()
                     if guard and guard.get("owner") == owner:
                         self.order_lock.release(owner)
-                    retries += 1
-                    status.retries = retries
+                    current["retries"] += 1
+                    status.retries = current["retries"]
                     self._transition(platform, State.FAILED, type(exc).__name__)
                     await self._capture(platform, "error")
                     await self._notify("failed", "操作失败，按重试上限退避", platform)
-                    if retries > self.config.monitor.max_retries:
-                        return
-                    self._transition(platform, State.RETRYING, "Bounded retry with backoff")
-                    delay = backoff(
-                        retries - 1,
-                        1,
-                        self.config.monitor.backoff_max,
-                        self.config.monitor.jitter,
-                        getattr(exc, "retry_after", 0),
-                    )
-                    if not await wait_or_stop(self._stop, delay):
-                        raise asyncio.CancelledError from None
+                    if current["retries"] <= self.config.monitor.max_retries:
+                        self._transition(platform, State.RETRYING, "Bounded retry with backoff")
+                        delay = backoff(
+                            current["retries"] - 1,
+                            1,
+                            self.config.monitor.backoff_max,
+                            self.config.monitor.jitter,
+                            getattr(exc, "retry_after", 0),
+                        )
+                        if platform != Platform.APPLE:
+                            delay = max(delay, self._interval(platform))
+                        queue.insert(0, platform)
+                if queue and not await wait_or_stop(self._stop, delay):
+                    raise asyncio.CancelledError
             if self._stop.is_set():
                 raise asyncio.CancelledError
-            self._transition(platform, State.FAILED, "Stock check limit reached")
+        except PurchaseTaken:
+            self._transition(platform, State.STOPPED, "Another platform reserved the purchase")
         except asyncio.CancelledError:
+            owner = self._owner(platform)
             guard = self.order_lock.status()
             if guard and guard.get("owner") == owner and guard.get("status") == "SUBMITTING":
                 self.order_lock.mark_submission(owner, "UNKNOWN")
                 self._transition(
                     platform, State.WAITING_HUMAN, "Submission interrupted; outcome UNKNOWN"
                 )
-            elif not guard or guard.get("owner") != owner or guard.get("status") not in UNCERTAIN:
+            elif self._status[platform].state not in {State.SUCCESS, State.STOPPED} and (
+                not guard or guard.get("owner") != owner or guard.get("status") not in UNCERTAIN
+            ):
                 self._transition(platform, State.STOPPED, "Stopped by user")
         except Exception as exc:
             # Unclassified failures may follow a partial UI action: no automatic replay.
-            self._transition(platform, State.WAITING_HUMAN, type(exc).__name__)
+            if self._status[platform].state != State.SUCCESS:
+                self._transition(platform, State.WAITING_HUMAN, type(exc).__name__)
             await self._capture(platform, "error")
             await self._notify("failed", "未知错误已停止自动操作，请人工检查", platform)
         finally:
-            self._active_platforms.discard(platform)
+            held_states = {State.WAITING_HUMAN, State.READY_TO_SUBMIT, State.SUCCESS}
+            if self._status[platform].state not in held_states:
+                self._session_holds.pop(key, None)
+            for peer in queue:
+                if self._status[peer].state not in {State.STOPPED, State.FAILED}:
+                    self._transition(peer, State.STOPPED, "Shared session workflow ended")
             changed, self._guard_changed = self._guard_changed, asyncio.Event()
             changed.set()
 
@@ -449,14 +551,27 @@ class Engine:
             ",".join(dict.fromkeys(product for _, product, _ in targets)),
         )
         for platform, items in grouped.items():
+            self._owner_channels[self._owner(platform)] = platform
+            if self.session_hold(platform) and self._status[platform].state in {
+                State.SUCCESS,
+                State.READY_TO_SUBMIT,
+                State.WAITING_HUMAN,
+            }:
+                continue
             self._status[platform] = PlatformStatus(platform=platform, product_id=items[0][0])
             self._machines[platform] = StateMachine(
                 platform,
                 items[0][0],
                 recorder=lambda event: self.database.record_event(self.run_id, event),
             )
-        if self.order_lock.status():
+        if self.order_lock.status() or any(self.session_hold(p) for p in grouped):
             for platform in grouped:
+                if self._status[platform].state in {
+                    State.SUCCESS,
+                    State.READY_TO_SUBMIT,
+                    State.WAITING_HUMAN,
+                }:
+                    continue
                 self._transition(platform, State.PREPARING)
                 self._transition(
                     platform, State.WAITING_HUMAN, "Existing order guard requires reconciliation"
@@ -465,9 +580,13 @@ class Engine:
             return self.snapshot()
         self.running = True
         try:
-            await self._notify("started", "程序启动；平台分别监测，最终订单使用单一锁")
-            self._active_platforms = set(grouped)
-            self._tasks = [asyncio.create_task(self._worker(p, t)) for p, t in grouped.items()]
+            await self._notify("started", "程序启动；京东独立监测，淘宝天猫共用会话并串行操作")
+            sessions: dict[str, dict[Platform, list[tuple[str, str]]]] = {}
+            for platform in sorted(grouped, key=lambda p: p == Platform.TAOBAO):
+                sessions.setdefault(session_key(platform), {})[platform] = grouped[platform]
+            self._tasks = [
+                asyncio.create_task(self._worker(channels)) for channels in sessions.values()
+            ]
             await asyncio.gather(*self._tasks)
         finally:
             self.running = False
@@ -494,17 +613,20 @@ class Engine:
             task.cancel()
         if tasks:
             await asyncio.gather(*tasks, return_exceptions=True)
+        # Explicit stop releases in-memory navigation ownership. Persistent order
+        # guards still report their hold and cannot be cleared by stopping a task.
+        self._session_holds.clear()
 
     async def resume(self, platform: Platform | None = None) -> None:
+        if platform is not None:
+            hold = self.session_hold(platform)
+            if hold and hold["active_channel"] in Platform:
+                platform = Platform(hold["active_channel"])
         guard = self.order_lock.status()
         for target, event in self._resume.items():
             if platform is not None and target != platform:
                 continue
-            if (
-                guard
-                and guard.get("owner") == self._owner(target)
-                and guard.get("status") in UNCERTAIN
-            ):
+            if guard and guard.get("status") in UNCERTAIN:
                 await self._notify(
                     "unknown", "订单结果仍需人工核对；resume 不会解锁或重复提交", target
                 )

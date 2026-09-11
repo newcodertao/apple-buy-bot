@@ -2,12 +2,20 @@ from collections.abc import Iterable
 from decimal import Decimal
 from typing import Any
 
-from src.core.models import SKU
+from src.core.models import SKU, Platform, SaleMode, StockState
 
 
 def score_sku(sku: SKU, preferences: Any) -> tuple[int, int, int] | None:
     """Lower scores win; every option must be explicitly approved in config."""
     if not sku.available or sku.currency != "CNY" or sku.price > Decimal(preferences.max_price):
+        return None
+    if sku.platform != Platform.APPLE and (
+        sku.stock_state != StockState.AVAILABLE
+        or sku.sale_mode != SaleMode.NORMAL
+        or not sku.seller_id
+        or not sku.region
+        or not sku.platform_item_id
+    ):
         return None
     try:
         return (

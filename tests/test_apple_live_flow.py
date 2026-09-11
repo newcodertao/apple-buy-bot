@@ -162,7 +162,7 @@ async def test_delivery_failure_stops_before_any_bag_action(apple_page, monkeypa
     adapter, page = apple_page
     await page.set_content(
         '<button data-autom="add-to-cart" onclick="document.body.dataset.adds=1">'
-        '添加到购物袋</button>'
+        "添加到购物袋</button>"
     )
 
     async def missing_quotes():
@@ -278,6 +278,13 @@ async def test_submission_once_and_receipt_without_payment(apple_page):
     )
     result = await adapter.submit_order()
     assert result.status == "SUCCESS" and result.order_id == "W123456789"
+    assert result.payment_state == "UNPAID"
+    assert (await adapter.read_order_status("W999999999")).status == "UNKNOWN"
+    adapter._last_order_id = None
+    adapter.selected = None  # A restarted adapter only has the persisted order reference.
+    assert (await adapter.read_order_status()).status == "UNKNOWN"
+    restored = await adapter.read_order_status("W123456789")
+    assert restored.status == "SUCCESS" and restored.payment_state == "UNPAID"
     assert (await adapter.submit_order()).status == "UNKNOWN"
 
 

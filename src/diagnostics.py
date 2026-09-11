@@ -4,6 +4,7 @@ import sys
 import httpx
 from playwright.async_api import Error, async_playwright
 
+from src.browser.groups import profile_platform, session_key
 from src.browser.manager import BROWSER_CHANNEL
 from src.core.clock import diagnostics
 from src.core.config import AppConfig
@@ -51,7 +52,8 @@ async def doctor(config: AppConfig, online: bool = False) -> dict:
         database.close()
     checks["profiles"] = {
         p.value: {
-            "exists": (config.paths.profiles / p.value).is_dir(),
+            "exists": (config.paths.profiles / profile_platform(p).value).is_dir(),
+            "session_group": session_key(p),
             "login": "UNKNOWN",
             "reason": "Profile existence is not authentication evidence",
         }

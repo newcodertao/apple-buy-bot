@@ -36,6 +36,10 @@ class PlatformAdapter(ABC):
     @abstractmethod
     async def submit_order(self) -> OrderResult: ...
 
+    async def read_order_status(self, order_id: str | None = None) -> OrderResult:
+        """Read the current receipt only; absence never proves no order exists."""
+        return OrderResult(status="UNKNOWN", message="当前页面尚无可核对的订单回执")
+
     @abstractmethod
     async def detect_verification(self) -> Verification: ...
 

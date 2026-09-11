@@ -1,6 +1,7 @@
 from datetime import datetime
 from decimal import Decimal
 from enum import StrEnum
+from typing import Literal
 
 from pydantic import BaseModel, ConfigDict, Field
 
@@ -13,6 +14,39 @@ class Platform(StrEnum):
     APPLE = "apple"
     JD = "jd"
     TMALL = "tmall"
+    TAOBAO = "taobao"
+
+
+class StockState(StrEnum):
+    UNKNOWN = "UNKNOWN"
+    AVAILABLE = "AVAILABLE"
+    UNAVAILABLE = "UNAVAILABLE"
+
+
+class SaleMode(StrEnum):
+    UNKNOWN = "UNKNOWN"
+    NORMAL = "NORMAL"
+    PREORDER = "PREORDER"
+    RESERVATION = "RESERVATION"
+
+
+class FinancingState(StrEnum):
+    UNKNOWN = "UNKNOWN"
+    ELIGIBLE = "ELIGIBLE"
+    INELIGIBLE = "INELIGIBLE"
+
+
+class FinancingOffer(Model):
+    provider: str = ""
+    terms: int | None = Field(default=None, gt=0)
+    interest: Decimal | None = Field(default=None, ge=0, allow_inf_nan=False)
+    service_fee: Decimal | None = Field(default=None, ge=0, allow_inf_nan=False)
+    total_repayment: Decimal | None = Field(default=None, gt=0, allow_inf_nan=False)
+    principal: Decimal | None = Field(default=None, gt=0, allow_inf_nan=False)
+    verified_at: datetime | None = None
+    stage: Literal["PRE_ORDER", "POST_ORDER"] = "PRE_ORDER"
+    state: FinancingState = FinancingState.UNKNOWN
+    selected: bool = False
 
 
 class State(StrEnum):
@@ -52,6 +86,13 @@ class SKU(Model):
     currency: str = "CNY"
     delivery: str | None = None
     pickup: str | None = None
+    seller_id: str = ""
+    shop_name: str = ""
+    platform_item_id: str = ""
+    region: str = ""
+    observed_at: datetime | None = None
+    stock_state: StockState = StockState.UNKNOWN
+    sale_mode: SaleMode = SaleMode.UNKNOWN
 
 
 class OrderReview(Model):
@@ -70,12 +111,26 @@ class OrderReview(Model):
     checkout_valid: bool
     # Count ALL line items, including accessories, before allowing submit.
     line_items: int = Field(ge=0)
+    seller_id: str = ""
+    shop_name: str = ""
+    platform_item_id: str = ""
+    region: str = ""
+    observed_at: datetime | None = None
+    stock_state: StockState = StockState.UNKNOWN
+    sale_mode: SaleMode = SaleMode.UNKNOWN
+    items_subtotal: Decimal | None = Field(default=None, ge=0, allow_inf_nan=False)
+    discount: Decimal | None = Field(default=None, ge=0, allow_inf_nan=False)
+    shipping: Decimal | None = Field(default=None, ge=0, allow_inf_nan=False)
+    fees: Decimal | None = Field(default=None, ge=0, allow_inf_nan=False)
+    financing: FinancingOffer | None = None
 
 
 class OrderResult(Model):
     status: str  # SUCCESS / REJECTED / UNKNOWN; UNKNOWN must never be retried.
     order_id: str | None = None
     message: str = ""
+    payment_state: str = "UNKNOWN"
+    financing_state: str = "UNKNOWN"
 
 
 class Verification(Model):

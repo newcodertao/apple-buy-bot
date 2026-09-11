@@ -63,6 +63,7 @@ class AppleCNAdapter(InspectionAdapter):
         self._quantity = 1
         self._allow_submit = allow_submit
         self._submit_attempted = False
+        self._last_order_id: str | None = None
         self.payment_method = payment_method
         self.installment_bank = installment_bank
         self._installment_verified_at = None
@@ -450,17 +451,52 @@ class AppleCNAdapter(InspectionAdapter):
             try:
                 await self._locator("submit_order").click()
                 await self._locator("order_confirmation").wait_for(state="visible", timeout=30_000)
-                if urlsplit(self._page().url).path != "/shop/checkout/thankyou":
-                    raise HumanRequired("Unrecognized order confirmation page")
-                text = await self._locator("order_confirmation").inner_text()
-                match = re.fullmatch(r"订单\s*#(W\d+)", text.strip())
-                heading = await self._locator("payment_heading").inner_text()
-                if match and "请使用你的微信扫描此二维码进行付款" in heading:
-                    return OrderResult(
-                        status="SUCCESS", order_id=match[1], message="Unpaid order confirmed"
-                    )
+                return await self._read_unpaid_receipt(after_submit=True)
             except Exception:
                 # A click may already have created an order. The Engine keeps its
                 # durable guard and the live browser for human reconciliation.
                 return OrderResult(status="UNKNOWN", message="No conclusive unpaid order receipt")
-            return OrderResult(status="UNKNOWN", message="No conclusive unpaid order receipt")
+
+    async def _read_unpaid_receipt(
+        self, order_id: str | None = None, *, after_submit: bool = False
+    ) -> OrderResult:
+        unknown = OrderResult(status="UNKNOWN", message="No matching verified unpaid order receipt")
+        expected = order_id if order_id is not None else self._last_order_id
+        if not after_submit and (expected is None or re.fullmatch(r"W\d+", expected) is None):
+            return unknown
+        page = self._page()
+        if urlsplit(page.url).path != "/shop/checkout/thankyou":
+            return unknown
+        receipt = self._locator("order_confirmation")
+        heading = self._locator("payment_heading")
+        if await receipt.count() != 1 or await heading.count() != 1:
+            return unknown
+        if not await receipt.is_visible() or not await heading.is_visible():
+            return unknown
+        match = re.fullmatch(r"订单\s*#(W\d+)", (await receipt.inner_text()).strip())
+        if (
+            match is None
+            or (expected is not None and match[1] != expected)
+            or "请使用你的微信扫描此二维码进行付款" not in await heading.inner_text()
+        ):
+            return unknown
+        self._last_order_id = match[1]
+        return OrderResult(
+            status="SUCCESS",
+            order_id=match[1],
+            message="Matching unpaid order confirmed",
+            payment_state="UNPAID",
+        )
+
+    async def read_order_status(self, order_id: str | None = None) -> OrderResult:
+        """Read the current receipt; never navigate, resubmit, or infer a missing order."""
+        async with self._lock:
+            try:
+                self._page()
+                if (await self._detect_verification()).required:
+                    return OrderResult(status="UNKNOWN", message="Order receipt needs human review")
+                return await self._read_unpaid_receipt(order_id)
+            except Exception:
+                return OrderResult(
+                    status="UNKNOWN", message="No matching verified unpaid order receipt"
+                )

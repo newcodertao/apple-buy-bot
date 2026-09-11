@@ -17,6 +17,7 @@ ALLOWED_HOSTS = {
     Platform.APPLE: ("apple.com", "apple.com.cn"),
     Platform.JD: ("jd.com",),
     Platform.TMALL: ("tmall.com",),
+    Platform.TAOBAO: ("taobao.com",),
 }
 
 
@@ -71,6 +72,7 @@ class ProductPreferences(Model):
     )
     quantity: int = Field(default=1, ge=1, le=100)
     max_price: Decimal = Field(default=Decimal("15000"), gt=0, allow_inf_nan=False)
+    max_total: Decimal | None = Field(default=None, gt=0, allow_inf_nan=False)
 
     @field_validator("model_priority", "capacity_priority", "color_priority")
     @classmethod
@@ -82,6 +84,19 @@ class ProductPreferences(Model):
 
 class ProductTarget(Model):
     url: str = ""
+    seller_ids: list[str] = Field(default_factory=list)
+    region: str = ""
+    max_shipping: Decimal = Field(default=Decimal("0"), ge=0, allow_inf_nan=False)
+    max_fees: Decimal = Field(default=Decimal("0"), ge=0, allow_inf_nan=False)
+
+    @field_validator("seller_ids")
+    @classmethod
+    def valid_sellers(cls, values: list[str]) -> list[str]:
+        if any(not value.strip() or value != value.strip() for value in values):
+            raise ValueError("Seller identifiers must be nonblank without surrounding spaces")
+        if len(set(values)) != len(values):
+            raise ValueError("Seller identifiers must be unique")
+        return values
 
 
 class ProductConfig(Model):
@@ -90,6 +105,7 @@ class ProductConfig(Model):
     capacity_priority: list[str] | None = None
     color_priority: list[str] | None = None
     max_price: Decimal | None = Field(default=None, gt=0, allow_inf_nan=False)
+    max_total: Decimal | None = Field(default=None, gt=0, allow_inf_nan=False)
     quantity: int | None = Field(default=None, ge=1, le=100)
 
     @model_validator(mode="after")
@@ -102,6 +118,7 @@ class ProductConfig(Model):
 
 class PlatformSettings(Model):
     enabled: bool = True
+    refresh_interval: float = Field(default=10.0, ge=10, le=300)
 
 
 class MonitorSettings(Model):
@@ -121,6 +138,7 @@ class OrderSettings(Model):
     mode: str = "race"
     payment_method: Literal["installments", "wechat"] = "installments"
     installment_bank: str = Field(default="中国建设银行", min_length=1, max_length=80)
+    allow_post_order_financing_check: bool = False
 
     @field_validator("mode")
     @classmethod
@@ -168,6 +186,7 @@ class AppConfig(Model):
     monitor: MonitorSettings = Field(default_factory=MonitorSettings)
     order: OrderSettings = Field(default_factory=OrderSettings)
     _root: Path = PrivateAttr(default=PROJECT_ROOT)
+    _source_path: Path | None = PrivateAttr(default=None)
 
     @property
     def paths(self) -> Paths:
@@ -177,7 +196,7 @@ class AppConfig(Model):
         target = self.products[product_id]
         values = self.product.model_dump()
         values["model_priority"] = [target.model]
-        for key in ("capacity_priority", "color_priority", "max_price", "quantity"):
+        for key in ("capacity_priority", "color_priority", "max_price", "max_total", "quantity"):
             if getattr(target, key) is not None:
                 values[key] = getattr(target, key)
         return ProductPreferences.model_validate(values)
@@ -214,6 +233,7 @@ def load_config(path: Path = DEFAULT_CONFIG) -> AppConfig:
         config = AppConfig.model_validate(value)
         # All runtime paths are anchored to config's project root, never caller cwd.
         config._root = path.resolve().parent.parent
+        config._source_path = path.resolve()
         return config
     except (ValueError, yaml.YAMLError, OSError) as exc:
         # Validation errors may echo user-supplied credentials; do not print the raw error.

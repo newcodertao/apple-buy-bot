@@ -5,6 +5,7 @@ import asyncio
 import pytest
 
 import src.main as cli
+from src.browser.groups import profile_platform
 from src.browser.session import ProfileLock
 from src.core.config import AppConfig
 from src.core.exceptions import HumanRequired
@@ -68,7 +69,9 @@ def configure_console(monkeypatch, tmp_path, runtime):
 
 @pytest.mark.parametrize("exit_action", ["stop", "browser_close"])
 async def test_completed_unknown_worker_keeps_browser_open_until_user_exits(
-    tmp_path, monkeypatch, exit_action,
+    tmp_path,
+    monkeypatch,
+    exit_action,
 ):
     runtime = ConsoleRuntime()
     args, queue = configure_console(monkeypatch, tmp_path, runtime)
@@ -91,7 +94,8 @@ async def test_completed_unknown_worker_keeps_browser_open_until_user_exits(
 
 
 async def test_console_stop_during_active_worker_exits_without_cancelled_error(
-    tmp_path, monkeypatch,
+    tmp_path,
+    monkeypatch,
 ):
     runtime = ConsoleRuntime(active=True)
     args, queue = configure_console(monkeypatch, tmp_path, runtime)
@@ -121,10 +125,12 @@ def reconciliation_setup(tmp_path, monkeypatch, status):
 
 @pytest.mark.parametrize("locked_platform", list(Platform))
 async def test_reconcile_requires_every_browser_profile_to_be_closed(
-    tmp_path, monkeypatch, locked_platform,
+    tmp_path,
+    monkeypatch,
+    locked_platform,
 ):
     config, database, args = reconciliation_setup(tmp_path, monkeypatch, "UNKNOWN")
-    in_use = ProfileLock(config.paths.profiles / locked_platform.value)
+    in_use = ProfileLock(config.paths.profiles / profile_platform(locked_platform).value)
     in_use.acquire()
     try:
         with pytest.raises(HumanRequired, match="already in use"):

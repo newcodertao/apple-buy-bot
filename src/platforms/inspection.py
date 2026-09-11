@@ -1,5 +1,6 @@
 import asyncio
 import re
+from contextlib import asynccontextmanager
 from pathlib import Path
 from urllib.parse import urlsplit
 
@@ -80,43 +81,117 @@ class InspectionAdapter(PlatformAdapter):
                 page, output_dir, self.platform.value, "inspect", state
             )
 
-    async def _navigate(self, page: Page, url: str) -> None:
+    @asynccontextmanager
+    async def navigation_guard(
+        self,
+        page: Page,
+        *,
+        allowed_hosts: tuple[str, ...] | None = None,
+        allowed_popup_hosts: tuple[str, ...] = (),
+    ):
+        """Protect one action and its awaited navigations; popup hosts are opt-in."""
         blocked = False
+        sessions, popup_pages, pending = [], [], []
 
-        session = await page.context.new_cdp_session(page)
+        def validate(url: str, hosts: tuple[str, ...] | None) -> None:
+            self._validate_platform_url(url)
+            if hosts is not None and urlsplit(url).hostname not in hosts:
+                raise ConfigurationError("Navigation host is not approved for this step")
 
-        async def guard(event: dict) -> None:
+        async def attach(target: Page, hosts: tuple[str, ...] | None) -> None:
+            session = await page.context.new_cdp_session(target)
+            sessions.append(session)
+
+            async def guard(event: dict) -> None:
+                nonlocal blocked
+                try:
+                    validate(event["request"]["url"], hosts)
+                except ConfigurationError:
+                    blocked = True
+                    await session.send(
+                        "Fetch.failRequest",
+                        {"requestId": event["requestId"], "errorReason": "BlockedByClient"},
+                    )
+                    return
+                await session.send("Fetch.continueRequest", {"requestId": event["requestId"]})
+
+            # Fetch covers document redirect hops; context.route covers the first
+            # popup request before Playwright has exposed its Page object.
+            session.on("Fetch.requestPaused", guard)
+            await session.send(
+                "Fetch.enable",
+                {"patterns": [{"resourceType": "Document", "requestStage": "Request"}]},
+            )
+
+        def popup_opened(target: Page) -> None:
+            popup_pages.append(target)
+            pending.append(asyncio.create_task(attach(target, allowed_popup_hosts)))
+
+        async def guard_popup(route) -> None:
             nonlocal blocked
-            try:
-                self._validate_platform_url(event["request"]["url"])
-            except ConfigurationError:
-                blocked = True
-                await session.send(
-                    "Fetch.failRequest",
-                    {"requestId": event["requestId"], "errorReason": "BlockedByClient"},
-                )
-                return
-            await session.send("Fetch.continueRequest", {"requestId": event["requestId"]})
+            request = route.request
+            if request.is_navigation_request():
+                try:
+                    # The first popup request may not have a frame yet. Such a
+                    # request also stops before navigation, rather than attaching
+                    # a page guard after its first external request has escaped.
+                    same_page = request.frame.page is page
+                except Error:
+                    same_page = False
+                if not same_page:
+                    try:
+                        validate(request.url, allowed_popup_hosts)
+                    except ConfigurationError:
+                        blocked = True
+                        await route.abort("blockedbyclient")
+                        return
+            await route.fallback()
 
-        # Chromium Fetch pauses EACH document request, including redirect hops.
-        # Playwright page.route only handles a redirect chain's initial request.
-        session.on("Fetch.requestPaused", guard)
-        await session.send(
-            "Fetch.enable", {"patterns": [{"resourceType": "Document", "requestStage": "Request"}]}
-        )
+        await attach(page, allowed_hosts)
+        await page.context.route("**/*", guard_popup)
+        page.context.on("page", popup_opened)
         try:
             try:
-                await navigate(page, url)
+                yield
             except Exception:
                 if blocked:
-                    raise HumanRequired("Navigation left the approved platform domains") from None
+                    raise HumanRequired(
+                        "Navigation left the approved platform flow; check manually"
+                    ) from None
                 raise
+            if pending:
+                results = await asyncio.gather(*pending, return_exceptions=True)
+                blocked = blocked or any(isinstance(result, BaseException) for result in results)
+            if blocked:
+                raise HumanRequired("Navigation left the approved platform flow; check manually")
             try:
-                self._validate_platform_url(page.url)
+                validate(page.url, allowed_hosts)
+                for popup in popup_pages:
+                    validate(popup.url, allowed_popup_hosts)
             except ConfigurationError:
                 raise HumanRequired("Navigation left the approved platform domains") from None
         finally:
-            await session.detach()
+            page.context.remove_listener("page", popup_opened)
+            if pending:
+                await asyncio.gather(*pending, return_exceptions=True)
+            try:
+                await page.context.unroute("**/*", guard_popup)
+            except Error:
+                pass  # Closing the context removes its request routes.
+            for session in sessions:
+                try:
+                    await session.detach()
+                except Error:
+                    pass  # A user-closed popup/context has already removed its guard.
+
+    async def _navigate(self, page: Page, url: str) -> None:
+        allowed_hosts = None
+        if hasattr(self, "login_hosts"):
+            # A configured marketplace product URL authorizes its exact host;
+            # only known login hosts may be visited in its redirect chain.
+            allowed_hosts = (urlsplit(url).hostname, *self.login_hosts)
+        async with self.navigation_guard(page, allowed_hosts=allowed_hosts):
+            await navigate(page, url)
 
     async def _unknown(self, action: str) -> None:
         async with self._lock:

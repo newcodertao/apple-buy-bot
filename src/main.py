@@ -7,6 +7,7 @@ import sys
 import threading
 from pathlib import Path
 
+from src.browser.groups import unique_profile_platforms
 from src.core.config import DEFAULT_CONFIG, PROJECT_ROOT, load_config
 from src.core.exceptions import BotError, ConfigurationError, HumanRequired
 from src.core.logging import redact
@@ -16,6 +17,7 @@ LOGIN_URLS = {
     Platform.APPLE: "https://secure.www.apple.com.cn/shop/account/home",
     Platform.JD: "https://passport.jd.com/new/login.aspx",
     Platform.TMALL: "https://login.tmall.com/",
+    Platform.TAOBAO: "https://login.taobao.com/",
 }
 
 
@@ -68,7 +70,7 @@ def initialize(path: Path) -> dict:
     config = load_config(path)
     for directory in (config.paths.profiles, config.paths.logs, config.paths.screenshots):
         directory.mkdir(parents=True, exist_ok=True)
-    for platform in Platform:
+    for platform in unique_profile_platforms():
         (config.paths.profiles / platform.value).mkdir(exist_ok=True)
     database = Database(config.paths.database)
     database.initialize()
@@ -102,7 +104,7 @@ def console_queue() -> asyncio.Queue:
 
 async def run_console(runtime, platforms, immediate, dry_run):
     await runtime.start(platforms, immediate=immediate, dry_run=dry_run)
-    print("控制命令：resume [apple|jd|tmall] / stop / status。验证期间保持浏览器打开。")
+    print("控制命令：resume [apple|jd|tmall|taobao] / stop / status。验证期间保持浏览器打开。")
     queue = console_queue()
     reader = asyncio.create_task(queue.get())
     stop_requested = False
@@ -137,7 +139,7 @@ async def run_console(runtime, platforms, immediate, dry_run):
         while (
             not stop_requested
             and any(
-                p["state"] == "WAITING_HUMAN"
+                p["state"] in {"WAITING_HUMAN", "READY_TO_SUBMIT", "SUCCESS"}
                 for p in runtime.snapshot().get("platforms", {}).values()
             )
             and any(runtime.manager.current_page(p) is not None for p in Platform)
@@ -163,6 +165,7 @@ async def check(runtime, command, platforms):
     results = {}
     queue = None
     for platform in platforms:
+        runtime._require_session_idle(platform)
         adapter = runtime.adapters[platform]
         targets = runtime.config.targets([platform])
         if command == "check-stock" and not targets:
@@ -207,6 +210,7 @@ async def check(runtime, command, platforms):
 
 
 async def inspect_page(runtime, platform: Platform, url: str, destination: Path):
+    runtime._require_session_idle(platform)
     adapter = runtime.adapters[platform]
     path = await adapter.inspect(url, destination)
     evidence = json.loads(await asyncio.to_thread(path.read_text, encoding="utf-8"))
@@ -257,7 +261,7 @@ async def async_main(args) -> int:
                 # A live browser may still have an in-flight submission. Require its
                 # owner to close before accepting the human order-history confirmation.
                 with contextlib.ExitStack() as stack:
-                    for platform in Platform:
+                    for platform in unique_profile_platforms():
                         lock = ProfileLock(config.paths.profiles / platform.value)
                         lock.acquire()
                         stack.callback(lock.release)
@@ -281,6 +285,7 @@ async def async_main(args) -> int:
     try:
         if args.command == "login":
             platform = Platform(args.platform)
+            runtime._require_session_idle(platform)
             status = await runtime.manager.manual_login(platform, LOGIN_URLS[platform])
             output(
                 {

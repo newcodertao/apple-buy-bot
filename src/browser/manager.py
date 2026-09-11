@@ -10,6 +10,7 @@ from urllib.parse import urlsplit
 
 from playwright.async_api import BrowserContext, Error, Page, Playwright, async_playwright
 
+from src.browser.groups import profile_platform
 from src.browser.session import ProfileLock
 from src.core.exceptions import ConfigurationError, HumanRequired, RetryableError
 from src.core.models import LoginStatus, Platform
@@ -39,7 +40,7 @@ class BrowserSession:
 
 
 class BrowserManager:
-    """One persistent stable Chrome context per platform, guarded across processes."""
+    """One persistent stable Chrome context per session group, guarded across processes."""
 
     def __init__(self, profiles_dir: Path, headless: bool = False):
         self.profiles_dir = Path(profiles_dir).resolve()
@@ -49,22 +50,24 @@ class BrowserManager:
         self._lock = asyncio.Lock()
 
     def current_page(self, platform: Platform) -> Page | None:
-        session = self._sessions.get(platform)
+        session = self._sessions.get(profile_platform(platform))
         if session and not session.closed.is_set() and not session.page.is_closed():
             return session.page
         return None
 
     async def open(self, platform: Platform) -> Page:
-        return await self._open(Platform(platform), self.headless)
+        return await self._open(profile_platform(platform), self.headless)
 
     async def open_visible(self, platform: Platform) -> Page:
         """An explicit manual-login window uses the same persistent profile."""
+        platform = profile_platform(platform)
         session = self._sessions.get(platform)
         if session and session.headless:
             await self.close(platform)
         return await self._open(Platform(platform), headless=False)
 
     async def _open(self, platform: Platform, headless: bool) -> Page:
+        platform = profile_platform(platform)
         async with self._lock:
             session = self._sessions.get(platform)
             if session and not session.closed.is_set():
@@ -105,7 +108,7 @@ class BrowserManager:
 
     async def close(self, platform: Platform | None = None) -> None:
         async with self._lock:
-            targets = list(self._sessions) if platform is None else [Platform(platform)]
+            targets = list(self._sessions) if platform is None else [profile_platform(platform)]
             for target in targets:
                 session = self._sessions.pop(target, None)
                 if session:
@@ -121,7 +124,7 @@ class BrowserManager:
     async def manual_login(self, platform: Platform, url: str) -> LoginStatus:
         """Persist manual browser work; profile existence is never authentication proof."""
         validate_url(url)
-        platform = Platform(platform)
+        platform = profile_platform(platform)
         if platform in self._sessions:
             raise HumanRequired("Close the existing platform session before manual login")
         page = await self._open(platform, headless=False)

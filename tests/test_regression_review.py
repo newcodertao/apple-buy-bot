@@ -1,12 +1,24 @@
 """Regressions from independent review; all adapters are local test doubles."""
 
 import asyncio
+from datetime import UTC, datetime
 from decimal import Decimal
 
 from src.core.config import AppConfig
 from src.core.engine import Engine
 from src.core.exceptions import ConfigurationError
-from src.core.models import SKU, LoginStatus, OrderResult, OrderReview, Platform, Verification
+from src.core.models import (
+    SKU,
+    FinancingOffer,
+    FinancingState,
+    LoginStatus,
+    OrderResult,
+    OrderReview,
+    Platform,
+    SaleMode,
+    StockState,
+    Verification,
+)
 from src.runtime import Runtime
 from src.storage.database import Database
 
@@ -21,9 +33,20 @@ class ReviewAdapter:
         self.submits = 0
         self.checks = 0
         self.sku = SKU(
-            id="test-sku", platform=platform, product_id="iphone",
-            model="iPhone 18 Pro Max", capacity="512GB", color="黑色",
-            price=Decimal("10000"), available=True,
+            id="test-sku",
+            platform=platform,
+            product_id="iphone",
+            model="iPhone 18 Pro Max",
+            capacity="512GB",
+            color="黑色",
+            price=Decimal("10000"),
+            available=True,
+            seller_id="fixture-seller",
+            platform_item_id="fixture-item",
+            region="fixture-region",
+            observed_at=datetime.now(UTC),
+            stock_state=StockState.AVAILABLE,
+            sale_mode=SaleMode.NORMAL,
         )
 
     async def login_status(self):
@@ -53,10 +76,39 @@ class ReviewAdapter:
 
     async def verify_order(self):
         return OrderReview(
-            platform=self.platform, product_id=self.sku.product_id, sku_id=self.sku.id,
-            model=self.sku.model, capacity=self.sku.capacity, color=self.sku.color,
-            unit_price=self.sku.price, total_price=self.sku.price, quantity=1,
-            address_present=True, checkout_valid=True, line_items=1,
+            platform=self.platform,
+            product_id=self.sku.product_id,
+            sku_id=self.sku.id,
+            model=self.sku.model,
+            capacity=self.sku.capacity,
+            color=self.sku.color,
+            unit_price=self.sku.price,
+            total_price=self.sku.price,
+            quantity=1,
+            address_present=True,
+            checkout_valid=True,
+            line_items=1,
+            seller_id=self.sku.seller_id,
+            platform_item_id=self.sku.platform_item_id,
+            region=self.sku.region,
+            observed_at=datetime.now(UTC),
+            sale_mode=SaleMode.NORMAL,
+            stock_state=StockState.AVAILABLE,
+            items_subtotal=self.sku.price,
+            discount=0,
+            shipping=0,
+            fees=0,
+            financing=FinancingOffer(
+                provider="Fixture installments",
+                terms=24,
+                interest=0,
+                service_fee=0,
+                principal=self.sku.price,
+                total_repayment=self.sku.price,
+                verified_at=datetime.now(UTC),
+                selected=True,
+                state=FinancingState.ELIGIBLE,
+            ),
         )
 
     async def submit_order(self):
@@ -72,21 +124,31 @@ class ReviewAdapter:
 
 
 def configuration(tmp_path, *, dry_run=False, platforms=(Platform.APPLE,)):
-    config = AppConfig.model_validate({
-        "app": {"dry_run": dry_run},
-        "order": {"auto_submit": True},
-        "monitor": {"max_checks": 2, "max_retries": 1},
-        "products": {"iphone": {
-            "model": "iPhone 18 Pro Max",
-            "platforms": {
-                platform.value: {
-                    "url": "https://apple.com/test" if platform == Platform.APPLE
-                    else "https://jd.com/test",
+    config = AppConfig.model_validate(
+        {
+            "app": {"dry_run": dry_run},
+            "order": {"auto_submit": True},
+            "monitor": {"max_checks": 2, "max_retries": 1},
+            "products": {
+                "iphone": {
+                    "model": "iPhone 18 Pro Max",
+                    "platforms": {
+                        platform.value: {
+                            "url": {
+                                Platform.APPLE: "https://apple.com/test",
+                                Platform.JD: "https://jd.com/test",
+                                Platform.TMALL: "https://detail.tmall.com/item.htm?id=fixture",
+                                Platform.TAOBAO: "https://item.taobao.com/item.htm?id=fixture",
+                            }[platform],
+                            "seller_ids": ["fixture-seller"],
+                            "region": "fixture-region",
+                        }
+                        for platform in platforms
+                    },
                 }
-                for platform in platforms
             },
-        }},
-    })
+        }
+    )
     config._root = tmp_path
     return config
 
@@ -139,7 +201,9 @@ async def test_concurrent_start_requests_create_only_one_run(tmp_path):
     runtime.adapters = {Platform.APPLE: ReviewAdapter()}
     try:
         results = await asyncio.gather(
-            runtime.start(immediate=True), runtime.start(immediate=True), return_exceptions=True,
+            runtime.start(immediate=True),
+            runtime.start(immediate=True),
+            return_exceptions=True,
         )
         assert sum(isinstance(result, ConfigurationError) for result in results) == 1
         await asyncio.wait_for(runtime.task, timeout=1)
@@ -202,7 +266,7 @@ async def test_fresh_session_opens_page_before_demanding_login_proof(tmp_path):
         database.close()
 
 
-async def test_other_platform_can_continue_after_confirmed_rejection(tmp_path, monkeypatch):
+async def test_next_run_can_use_other_platform_after_confirmed_rejection(tmp_path, monkeypatch):
     async def skip_backoff(stop, seconds):
         await asyncio.sleep(0)
         return not stop.is_set()
@@ -212,13 +276,21 @@ async def test_other_platform_can_continue_after_confirmed_rejection(tmp_path, m
     jd = ReviewAdapter(Platform.JD)
     database = Database(tmp_path / "audit.db")
     engine = Engine(
-        configuration(tmp_path, platforms=(Platform.APPLE, Platform.JD)),
-        {Platform.APPLE: apple, Platform.JD: jd}, database,
+        configuration(tmp_path, platforms=(Platform.APPLE,)),
+        {Platform.APPLE: apple},
+        database,
     )
     try:
         await asyncio.wait_for(engine.run(immediate=True), timeout=3)
         assert apple.submits == 1
-        assert jd.submits == 1, "Transient reservations must not permanently stop other platforms"
+        assert database.guard_status() is None
+        following = Engine(
+            configuration(tmp_path, platforms=(Platform.JD,)),
+            {Platform.JD: jd},
+            database,
+        )
+        await asyncio.wait_for(following.run(immediate=True), timeout=3)
+        assert jd.submits == 1, "Confirmed rejection must not block an explicit subsequent run"
         assert database.guard_status()["status"] == "SUCCESS"
     finally:
         await engine.stop()

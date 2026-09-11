@@ -48,7 +48,7 @@ def setup_logging(directory: Path) -> None:
     formatter = SafeFormatter(
         "%(asctime)s.%(msecs)03d %(levelname)s %(name)s %(message)s", datefmt="%Y-%m-%d %H:%M:%S"
     )
-    for name in ("engine", "apple", "jd", "tmall"):
+    for name in ("engine", "apple", "jd", "tmall", "taobao"):
         logger = logging.getLogger(name)
         logger.setLevel(logging.INFO)
         logger.propagate = False

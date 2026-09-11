@@ -5,5 +5,7 @@ from src.platforms.marketplace import parse_product
 
 def parse_skus(data: dict, *, product_id: str, preferences: ProductPreferences) -> list[SKU]:
     return [
-        parse_product(data, platform=Platform.JD, product_id=product_id, preferences=preferences)
+        parse_product(
+            data, platform=Platform.TAOBAO, product_id=product_id, preferences=preferences
+        )
     ]

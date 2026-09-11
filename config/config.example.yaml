@@ -12,23 +12,29 @@ product:
   color_priority: ["黑色", "银色", "冰川蓝色", "勃艮第酒红色"]
   quantity: 1
   max_price: 15000  # CNY per unit; full checkout total must also fit quantity * max_price.
+  max_total: 15000  # Actual payable total, including approved shipping and fees.
 products:
   iphone18promax:
     model: "iPhone 18 Pro Max"
     platforms:
       apple: {url: ""}  # UNKNOWN: fill only from the real official product page.
-      jd: {url: ""}
-      tmall: {url: ""}
+      # Use IDs and region exactly as verified on the live marketplace page.
+      # Empty seller_ids/region allow inspection, but never checkout submission.
+      jd: {url: "", seller_ids: [], region: "", max_shipping: 0, max_fees: 0}
+      tmall: {url: "", seller_ids: [], region: "", max_shipping: 0, max_fees: 0}
+      taobao: {url: "", seller_ids: [], region: "", max_shipping: 0, max_fees: 0}
   iphone18pro:
     model: "iPhone 18 Pro"
     platforms:
       apple: {url: ""}
       jd: {url: ""}
       tmall: {url: ""}
+      taobao: {url: ""}
 platforms:
   apple: {enabled: true}
-  jd: {enabled: true}
-  tmall: {enabled: true}
+  jd: {enabled: true, refresh_interval: 10}
+  tmall: {enabled: true, refresh_interval: 10}
+  taobao: {enabled: true, refresh_interval: 10}
 monitor:
   normal_interval: 3.0
   warmup_interval: 1.0
@@ -44,3 +50,5 @@ order:
   single_order_lock: true
   payment_method: installments
   installment_bank: 中国建设银行
+  # Only applies when terms are UNKNOWN; known non-zero-cost offers always pause.
+  allow_post_order_financing_check: false

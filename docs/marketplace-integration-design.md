@@ -2,6 +2,8 @@
 
 日期：2026-09-11。依据当前代码版本 f4ac5b3 与公开官方资料。本文是接入方案，未修改交易代码、未操作账号、未进行这些平台的实页下单验收。
 
+本文保留设计时的基线描述；后续实现与实际验收范围见 [多平台实页记录](marketplace-live-evidence.md) 和 [验收记录](../VALIDATION.md)。
+
 ## 1. 设计结论与范围
 
 继续使用现有 Python + Playwright 正式版 Chrome + asyncio + SQLite + FastAPI。保留 Adapter / Engine 分工，增加渠道差异需要的会话、商品身份、报价及分期核验能力，不引入微服务或消息队列。

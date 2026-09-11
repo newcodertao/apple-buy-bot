@@ -1,5 +1,17 @@
 """SQLite schema; monetary values are decimal strings, never binary floats."""
 
+ORDER_COLUMNS = {
+    "order_id": "TEXT",
+    "quantity": "INTEGER",
+    "total_price": "TEXT",
+    "seller_id": "TEXT",
+    "platform_item_id": "TEXT",
+    "session_group": "TEXT",
+    "payment_state": "TEXT NOT NULL DEFAULT 'UNKNOWN'",
+    "financing_state": "TEXT NOT NULL DEFAULT 'UNKNOWN'",
+    "review_json": "TEXT",
+}
+
 SCHEMA = """
 CREATE TABLE IF NOT EXISTS runs (
     run_id TEXT PRIMARY KEY,
@@ -42,7 +54,16 @@ CREATE TABLE IF NOT EXISTS orders (
     currency TEXT NOT NULL,
     status TEXT NOT NULL,
     created_at TEXT NOT NULL,
-    message TEXT NOT NULL
+    message TEXT NOT NULL,
+    order_id TEXT,
+    quantity INTEGER,
+    total_price TEXT,
+    seller_id TEXT,
+    platform_item_id TEXT,
+    session_group TEXT,
+    payment_state TEXT NOT NULL DEFAULT 'UNKNOWN',
+    financing_state TEXT NOT NULL DEFAULT 'UNKNOWN',
+    review_json TEXT
 );
 CREATE TABLE IF NOT EXISTS order_guard (
     singleton INTEGER PRIMARY KEY CHECK (singleton = 1),

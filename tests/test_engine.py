@@ -1,11 +1,23 @@
 import asyncio
+from datetime import UTC, datetime
 
 import pytest
 
 from src.core.config import AppConfig
 from src.core.engine import Engine
 from src.core.exceptions import HumanRequired, RetryableError, SelectorNotFound
-from src.core.models import SKU, LoginStatus, OrderResult, OrderReview, Platform, Verification
+from src.core.models import (
+    SKU,
+    FinancingOffer,
+    FinancingState,
+    LoginStatus,
+    OrderResult,
+    OrderReview,
+    Platform,
+    SaleMode,
+    StockState,
+    Verification,
+)
 from src.notify.base import Notifier
 from src.order.lock import OrderLock
 from src.platforms.base import PlatformAdapter
@@ -44,6 +56,12 @@ class FakeAdapter(PlatformAdapter):
             color="黑色",
             price=100,
             available=True,
+            seller_id="fixture-seller",
+            platform_item_id="fixture-item",
+            region="fixture-region",
+            observed_at=datetime.now(UTC),
+            stock_state=StockState.AVAILABLE,
+            sale_mode=SaleMode.NORMAL,
         )
 
     async def tick(self, action):
@@ -97,6 +115,27 @@ class FakeAdapter(PlatformAdapter):
             address_present=True,
             checkout_valid=True,
             line_items=1,
+            seller_id=self.sku.seller_id,
+            platform_item_id=self.sku.platform_item_id,
+            region=self.sku.region,
+            observed_at=datetime.now(UTC),
+            sale_mode=SaleMode.NORMAL,
+            stock_state=StockState.AVAILABLE,
+            items_subtotal=self.sku.price,
+            discount=0,
+            shipping=0,
+            fees=0,
+            financing=FinancingOffer(
+                provider="Fixture installments",
+                terms=24,
+                interest=0,
+                service_fee=0,
+                principal=self.sku.price,
+                total_repayment=self.sku.price,
+                verified_at=datetime.now(UTC),
+                selected=True,
+                state=FinancingState.ELIGIBLE,
+            ),
         )
         updates = self.review_updates.copy()
         if self.review_count >= 2:
@@ -147,7 +186,10 @@ def make_engine(
                                 Platform.APPLE: "https://www.apple.com.cn/shop/buy-iphone/fixture",
                                 Platform.JD: "https://item.jd.com/fixture.html",
                                 Platform.TMALL: "https://detail.tmall.com/item.htm?id=fixture",
-                            }[p]
+                                Platform.TAOBAO: "https://item.taobao.com/item.htm?id=fixture",
+                            }[p],
+                            "seller_ids": ["fixture-seller"],
+                            "region": "fixture-region",
                         }
                         for p in platforms
                     },
@@ -203,14 +245,15 @@ async def test_both_submit_switches_and_full_audit(tmp_path, dry_run, auto_submi
 
 
 @pytest.mark.parametrize("mode", ["race", "parallel"])
-async def test_three_platforms_can_never_submit_more_than_once(tmp_path, mode):
+async def test_four_channels_can_never_submit_more_than_once(tmp_path, mode):
     engine, adapters, db = make_engine(tmp_path, mode=mode, platforms=list(Platform))
     result = await engine.run(immediate=True)
     assert sum(a.calls.count("submit_order") for a in adapters.values()) == 1
     assert sum(v["state"] == "SUCCESS" for v in result["platforms"].values()) == 1
     assert db.guard_status()["status"] == "SUCCESS"
-    assert all(a.calls.count("check_stock") == 1 for a in adapters.values())
-    assert all(a.max_active == 1 for a in adapters.values())
+    # Alibaba channels queue on one session; the losing queued channel may stay untouched.
+    assert all(a.calls.count("check_stock") <= 1 for a in adapters.values())
+    assert all(a.max_active <= 1 for a in adapters.values())
 
 
 async def test_dry_run_override_never_submits(tmp_path):
@@ -365,7 +408,7 @@ async def test_stop_during_submission_persists_unknown(tmp_path):
     assert adapter.calls.count("submit_order") == 1
 
 
-async def test_confirmed_rejection_releases_lock_and_respects_retry_limit(tmp_path, monkeypatch):
+async def test_confirmed_rejection_releases_lock_without_replaying_purchase(tmp_path, monkeypatch):
     async def wait(stop, seconds):
         return not stop.is_set()
 
@@ -374,7 +417,8 @@ async def test_confirmed_rejection_releases_lock_and_respects_retry_limit(tmp_pa
     adapters[Platform.APPLE].submit_result = OrderResult(status="REJECTED")
     result = await engine.run(immediate=True)
     assert result["platforms"]["apple"]["state"] == "FAILED"
-    assert adapters[Platform.APPLE].calls.count("submit_order") == 2
+    assert adapters[Platform.APPLE].calls.count("submit_order") == 1
+    assert adapters[Platform.APPLE].calls.count("add_to_cart") == 1
     assert db.guard_status() is None
 
 
@@ -383,6 +427,6 @@ async def test_dry_run_reservation_blocks_second_run(tmp_path):
     await engine.run(immediate=True)
     calls = adapters[Platform.APPLE].calls.copy()
     result = await engine.run(immediate=True)
-    assert result["platforms"]["apple"]["state"] == "WAITING_HUMAN"
+    assert result["platforms"]["apple"]["state"] == "READY_TO_SUBMIT"
     assert adapters[Platform.APPLE].calls == calls
     assert db.guard_status()["status"] == "CLAIMED"
