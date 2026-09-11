@@ -45,7 +45,7 @@ def parser() -> argparse.ArgumentParser:
     web.add_argument("--port", type=int, default=8765)
     doctor = commands.add_parser("doctor", help="检查依赖、浏览器、配置、数据库和系统时间")
     doctor.add_argument("--online", action="store_true", help="增加一次 Apple 公共页面网络检查")
-    inspect = commands.add_parser("inspect", help="读取真实页面结构，保存脱敏 HTML 和截图")
+    inspect = commands.add_parser("inspect", help="保存最小化页面诊断与遮罩布局截图")
     inspect.add_argument("platform", choices=[p.value for p in Platform])
     inspect.add_argument("url")
     inspect.add_argument("--output", type=Path)
@@ -104,7 +104,11 @@ def console_queue() -> asyncio.Queue:
 
 async def run_console(runtime, platforms, immediate, dry_run):
     await runtime.start(platforms, immediate=immediate, dry_run=dry_run)
-    print("控制命令：resume [apple|jd|tmall|taobao] / stop / status。验证期间保持浏览器打开。")
+    print(
+        "控制命令：resume [platform] / confirm-address platform / "
+        "confirm-market platform / stop / status。"
+        "请先在浏览器核对地址和国行版本，再输入对应确认命令。"
+    )
     queue = console_queue()
     reader = asyncio.create_task(queue.get())
     stop_requested = False
@@ -126,8 +130,17 @@ async def run_console(runtime, platforms, immediate, dry_run):
                         await runtime.stop()
                     elif parts[0] == "status":
                         output(runtime.snapshot())
+                    elif parts[0] in {"confirm-address", "confirm-market"} and len(parts) == 2:
+                        output(
+                            await runtime.confirm_checkout(
+                                Platform(parts[1]), parts[0].split("-")[1]
+                            )
+                        )
                     else:
-                        print("可用命令：resume [platform] / stop / status")
+                        print(
+                            "可用命令：resume [platform] / confirm-address platform / "
+                            "confirm-market platform / stop / status"
+                        )
                 except (ValueError, BotError) as exc:
                     print(redact(str(exc)))
         if runtime.task:

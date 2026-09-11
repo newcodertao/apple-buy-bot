@@ -1,6 +1,7 @@
 from abc import ABC, abstractmethod
 from pathlib import Path
 
+from src.core.exceptions import HumanRequired
 from src.core.models import SKU, LoginStatus, OrderResult, OrderReview, Platform, Verification
 
 
@@ -39,6 +40,12 @@ class PlatformAdapter(ABC):
     async def read_order_status(self, order_id: str | None = None) -> OrderResult:
         """Read the current receipt only; absence never proves no order exists."""
         return OrderResult(status="UNKNOWN", message="当前页面尚无可核对的订单回执")
+
+    async def confirm_address(self) -> dict:
+        raise HumanRequired("当前页面没有可绑定的收货地址，请在结算页核对")
+
+    async def confirm_market(self) -> dict:
+        raise HumanRequired("当前页面没有可绑定的商品版本，请在商品或结算页核对国行版本")
 
     @abstractmethod
     async def detect_verification(self) -> Verification: ...

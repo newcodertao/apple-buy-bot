@@ -16,6 +16,7 @@ from src.browser.session import ProfileLock
 from src.core.exceptions import ConfigurationError, HumanRequired, RetryableError, SelectorNotFound
 from src.core.models import LoginStatus, Platform
 from src.platforms.apple_cn.adapter import AppleCNAdapter
+from src.platforms.inspection import InspectionAdapter
 from src.platforms.jd.adapter import JDAdapter
 from src.platforms.taobao.adapter import TaobaoAdapter
 from src.platforms.tmall.adapter import TmallAdapter
@@ -47,6 +48,10 @@ class LocalFixtureAdapter(AppleCNAdapter):
 
     allowed_hosts = ("127.0.0.1",)
     require_https = False
+
+    def _validate_platform_url(self, url):
+        # Exercise the shared redirect guard against the local HTTP server.
+        InspectionAdapter._validate_platform_url(self, url)
 
 
 @pytest.fixture
@@ -175,12 +180,14 @@ async def test_redacted_inspection_inventory_html_and_screenshot(tmp_path, local
             local_site + "/fixture?token=QUERY_SECRET", tmp_path / "inspect"
         )
         inventory = json.loads(inventory_path.read_text(encoding="utf-8"))
-        assert inventory["buttons"][0]["text"] == "购买"
-        assert inventory["links"][0]["text"] == "购物袋"
-        assert inventory["roles"]
-        assert inventory["data_attributes"]
-        assert inventory["inputs"]
-        assert inventory["metadata"]["redacted"] is True
+        assert inventory["metadata"]["collection_mode"] == "minimal_structure"
+        assert inventory["counts"]["buttons"] == 1
+        assert inventory["counts"]["links"] == 1
+        assert inventory["text"] == ""
+        assert not any(
+            inventory[key] for key in ("buttons", "links", "roles", "data_attributes", "inputs")
+        )
+        assert inventory["metadata"].get("redacted") is not True
         assert inventory["metadata"]["screenshot_mode"].startswith("layout_only")
         for text_path in inventory_path.parent.glob("*"):
             if text_path.suffix in {".json", ".html"}:

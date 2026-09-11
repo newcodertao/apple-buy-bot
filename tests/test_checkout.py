@@ -30,6 +30,10 @@ def checkout():
         total_price=sku.price,
         quantity=1,
         address_present=True,
+        address_fingerprint="fixture-address",
+        address_confirmed=True,
+        market_evidence="fixture-mainland-version",
+        market_verified=True,
         checkout_valid=True,
         line_items=1,
     )

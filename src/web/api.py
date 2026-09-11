@@ -34,6 +34,10 @@ class ProductRequest(SessionRequest):
     product_id: str
 
 
+class ConfirmationRequest(SessionRequest):
+    confirmed: Literal[True]
+
+
 class TargetRequest(ProductRequest):
     target: ProductTarget
 
@@ -100,9 +104,13 @@ async def health(request: Request):
     return {
         "status": "ok",
         "running": runtime.snapshot()["running"],
-        "selector_validation": "APPLE_PRODUCT_BAG_REVIEW_RECEIPT_VERIFIED",
-        "real_checkout_test": "CHROME_UNPAID_ORDER_PASS_2026_09_10",
-        "program_end_to_end_test": "BLOCKED_LIVE_BAG_404_DELIVERY_541_2026_09_10",
+        "validation_reference": "VALIDATION.md",
+        "live_automatic_order": "NOT_VERIFIED",
+        "apple_new_product_continue": "NOT_RUN",
+        "historical_2026_09_10": {
+            "ordinary_chrome": "UNPAID_ORDER_RECORDED",
+            "program_profile": "BLOCKED_BAG_404_DELIVERY_541",
+        },
         "marketplace_validation": {
             platform.value: {
                 **getattr(runtime.adapters[platform], "live_validation", {}),
@@ -124,6 +132,16 @@ async def start(request: Request, body: StartRequest):
 @router.post("/stop")
 async def stop(request: Request):
     return await request.app.state.runtime.stop()
+
+
+@router.post("/confirm-address")
+@router.post("/confirm-market")
+async def confirm_checkout(request: Request, body: ConfirmationRequest):
+    kind = {"/confirm-address": "address", "/confirm-market": "market"}[request.url.path]
+    try:
+        return await request.app.state.runtime.confirm_checkout(body.platform, kind)
+    except BotError as exc:
+        raise HTTPException(409, str(exc)) from None
 
 
 @router.post("/login")

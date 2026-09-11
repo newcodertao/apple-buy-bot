@@ -11,6 +11,7 @@ from src.core.exceptions import HumanRequired, SelectorNotFound
 from src.core.models import SKU, LoginStatus, Platform, State
 from src.platforms.apple_cn.adapter import AppleCNAdapter
 from src.platforms.apple_cn.parser import money, parse_skus, verify_installment_offer
+from src.platforms.inspection import InspectionAdapter
 
 
 @pytest.fixture
@@ -95,8 +96,9 @@ def test_price_rejects_installments_ambiguous_currency_and_malformed_numbers(tex
         money(text)
 
 
-def test_24_month_zero_apr_offer_matches_full_total():
-    verify_installment_offer("24 期\n0% 年化利率\nRMB 284/月\n总计 RMB 6,799", Decimal("6799"))
+def test_24_month_zero_apr_offer_needs_explicit_fees_and_repayment_schedule():
+    with pytest.raises(SelectorNotFound):
+        verify_installment_offer("24 期\n0% 年化利率\nRMB 284/月\n总计 RMB 6,799", Decimal("6799"))
 
 
 @pytest.mark.parametrize(
@@ -135,17 +137,19 @@ async def test_installment_bank_and_zero_rate_selection(apple_page):
       <label for="bank"><img alt="中国建设银行"></label>
       <input type="radio" id="term" data-autom="installments0000882476-24">
       <label for="term">24 期0% 年化利率RMB 284/月总计 RMB 6,799</label>""")
-    await adapter._select_installments()
+    with pytest.raises(SelectorNotFound, match="完整还款计划"):
+        await adapter._select_installments()
     assert await page.locator("#bank").is_checked()
     assert await page.locator("#term").is_checked()
-    assert adapter._installment_verified_at is not None
+    assert adapter._approved_installment is None
     await page.set_content(
         REVIEW.replace("微信支付", "中国建设银行").replace(
             '<img alt="中国建设银行">',
             '<img alt="中国建设银行">分期付款方案：24 个月，每月约 RMB 284',
         )
     )
-    assert (await adapter._read_review()).total_price == Decimal("6799")
+    with pytest.raises(HumanRequired, match="重新核对"):
+        await adapter._read_review()
 
 
 @pytest.mark.browser
@@ -169,6 +173,12 @@ async def test_delivery_failure_stops_before_any_bag_action(apple_page, monkeypa
         return {"delivery": []}
 
     monkeypatch.setattr(adapter, "_snapshot", missing_quotes)
+
+    async def confirmed_market():
+        return "test-market"
+
+    monkeypatch.setattr(adapter, "_market_fingerprint", confirmed_market)
+    adapter._confirmed_market = "test-market"
     with pytest.raises(HumanRequired, match="配送信息未加载"):
         await adapter.add_to_cart(1)
     assert not adapter._cart_attempted
@@ -178,6 +188,13 @@ async def test_delivery_failure_stops_before_any_bag_action(apple_page, monkeypa
 class FixtureApple(AppleCNAdapter):
     allowed_hosts = ("127.0.0.1",)
     require_https = False
+
+    def _validate_platform_url(self, url):
+        InspectionAdapter._validate_platform_url(self, url)
+
+    def _require_cn_store(self):
+        # Local fixture only; production enforces the exact CN transaction hosts.
+        pass
 
 
 @pytest.fixture
@@ -228,6 +245,7 @@ REVIEW = """<main><h1>准备下单了吗？</h1>
 <span data-autom="form-field-city">测试市</span>
 <span data-autom="form-field-district">测试区</span>
 <span data-autom="form-field-street">测试地址</span>
+<span data-autom="form-field-countryCode">中国大陆</span>
 <span data-autom="form-field-emailAddress">a***@example.test</span>
 <span data-autom="form-field-fullDaytimePhone">1**********</span>
 <button data-autom="continue-button-placeOrder" onclick="document.body.dataset.submits='1'">
@@ -238,6 +256,8 @@ REVIEW = """<main><h1>准备下单了吗？</h1>
 async def test_review_uses_rendered_masked_address_and_full_price(apple_page):
     adapter, page = apple_page
     await page.set_content(REVIEW)
+    await adapter.confirm_address()
+    await adapter.confirm_market()
     review = await adapter.verify_order()
     assert review.address_present and review.checkout_valid
     assert review.quantity == 1 and review.unit_price == Decimal("6799")
@@ -276,6 +296,8 @@ async def test_submission_once_and_receipt_without_payment(apple_page):
             "document.body.dataset.submits='1'", "location.href='/shop/checkout/thankyou'"
         )
     )
+    await adapter.confirm_address()
+    await adapter.confirm_market()
     result = await adapter.submit_order()
     assert result.status == "SUCCESS" and result.order_id == "W123456789"
     assert result.payment_state == "UNPAID"

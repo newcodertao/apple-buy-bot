@@ -5,6 +5,8 @@ Missing fields are human handoff points, never invented product or stock data.
 """
 
 import asyncio
+import hashlib
+import json
 import re
 from datetime import UTC, datetime
 from decimal import Decimal
@@ -15,7 +17,7 @@ from playwright.async_api import Locator, Page
 
 from src.browser.manager import BrowserManager
 from src.core.config import OrderSettings, ProductPreferences, ProductTarget
-from src.core.exceptions import HumanRequired, SelectorNotFound
+from src.core.exceptions import CandidateUnavailable, HumanRequired, SelectorNotFound
 from src.core.models import (
     SKU,
     FinancingOffer,
@@ -161,6 +163,61 @@ class MarketplaceAdapter(InspectionAdapter):
         self._cart_attempted = False
         self._submit_attempted = False
         self._last_review: OrderReview | None = None
+        self._confirmed_address = ""
+        self._confirmed_market = ""
+
+    def _digest(self, value) -> str:
+        return hashlib.sha256(
+            json.dumps([self.platform.value, value], ensure_ascii=False).encode()
+        ).hexdigest()
+
+    async def _address_fingerprint(self) -> str:
+        if not await self._field("review_address_selected").is_checked():
+            return ""
+        # Only the mapped selected-address container is read, transiently.
+        # Raw contact data is never stored, returned or sent to diagnostics.
+        identity = await self._text("review_address_identity")
+        return self._digest(normalize(identity)) if identity else ""
+
+    async def _market_fingerprint(self) -> str:
+        if self.selected is None:
+            return ""
+        rows = self._field("review_items").filter(visible=True)
+        if await rows.count() != 1:
+            return ""
+        row = rows.first
+        name = await self._text("review_name", row)
+        version = await self._maybe_text("review_version", row)
+        if re.search(r"港版|美版|日版|海外版|国际版", name + version):
+            raise HumanRequired("当前商品存在非国行版本证据，不能确认国行")
+        sku = self.selected
+        if not model_in_title(sku.model, name) or any(
+            normalize(v) not in normalize(name) for v in (sku.capacity, sku.color)
+        ):
+            return ""
+        item = await self._text("review_item_id", row)
+        seller = await self._text("review_seller_id", row)
+        if item != sku.platform_item_id or seller != sku.seller_id:
+            return ""
+        return self._digest([sku.id, item, seller, name, version])
+
+    async def confirm_address(self) -> dict:
+        async with self._lock:
+            await self._guard_human()
+            fingerprint = await self._address_fingerprint()
+            if not fingerprint:
+                raise HumanRequired("请在结算页选择并核对当前收货地址")
+            self._confirmed_address = fingerprint
+            return {"address_fingerprint": fingerprint, "address_confirmed": True}
+
+    async def confirm_market(self) -> dict:
+        async with self._lock:
+            await self._guard_human()
+            fingerprint = await self._market_fingerprint()
+            if not fingerprint:
+                raise HumanRequired("请在结算页核对当前商品的国行版本及销售方")
+            self._confirmed_market = fingerprint
+            return {"market_evidence": "MANUAL_CN:" + fingerprint, "market_verified": True}
 
     def _page(self) -> Page:
         page = self.manager.current_page(self.platform)
@@ -293,6 +350,8 @@ class MarketplaceAdapter(InspectionAdapter):
     async def select_sku(self, sku: SKU) -> None:
         async with self._lock:
             await self._guard_human()
+            if self._cart_attempted or self._submit_attempted:
+                raise HumanRequired("已有加购或提交尝试，须核对原页面，不能切换候选")
             if sku.platform != self.platform or sku.product_id != self.product_id:
                 raise HumanRequired("所选规格不属于当前渠道商品")
             current = parse_product(
@@ -301,8 +360,10 @@ class MarketplaceAdapter(InspectionAdapter):
                 product_id=self.product_id,
                 preferences=self.preferences[self.product_id],
             )
-            if current.id != sku.id or current.price != sku.price:
+            if current.id != sku.id:
                 raise HumanRequired("当前商品规格或报价已变化，请重新监测")
+            if current.stock_state == StockState.UNAVAILABLE or current.price != sku.price:
+                raise CandidateUnavailable("当前候选已明确缺货或价格变化，尚未加购")
             self._target_check(current)
             self.selected = current
 
@@ -424,6 +485,8 @@ class MarketplaceAdapter(InspectionAdapter):
         if not quantity:
             raise SelectorNotFound("结算数量无法确认")
         total = cny(await self._text("review_total"))
+        address = await self._address_fingerprint()
+        market = await self._market_fingerprint()
         review = OrderReview(
             platform=self.platform,
             product_id=sku.product_id,
@@ -446,6 +509,10 @@ class MarketplaceAdapter(InspectionAdapter):
             shipping=cny(await self._text("review_shipping"), zero=True),
             fees=cny(await self._text("review_fees"), zero=True),
             address_present=await self._field("review_address_selected").is_checked(),
+            address_fingerprint=address,
+            address_confirmed=bool(address and address == self._confirmed_address),
+            market_evidence="MANUAL_CN:" + market if market else "",
+            market_verified=bool(market and market == self._confirmed_market),
             checkout_valid=await self._field("submit_order").is_enabled(),
             line_items=1,
             financing=await self._read_financing(total),

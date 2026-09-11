@@ -1,16 +1,25 @@
 import asyncio
+import hashlib
+import json
 import re
+from datetime import UTC, datetime
 from pathlib import Path
-from time import monotonic
 from urllib.parse import urlsplit
 
 from playwright.async_api import TimeoutError as PlaywrightTimeout
 from playwright.async_api import expect
 
-from src.core.config import ProductPreferences
-from src.core.exceptions import ConfigurationError, HumanRequired, SelectorNotFound
+from src.core.config import ProductPreferences, validate_platform_url
+from src.core.exceptions import (
+    CandidateUnavailable,
+    ConfigurationError,
+    HumanRequired,
+    SelectorNotFound,
+)
 from src.core.models import (
     SKU,
+    FinancingOffer,
+    FinancingState,
     LoginStatus,
     OrderResult,
     OrderReview,
@@ -66,7 +75,124 @@ class AppleCNAdapter(InspectionAdapter):
         self._last_order_id: str | None = None
         self.payment_method = payment_method
         self.installment_bank = installment_bank
-        self._installment_verified_at = None
+        self._approved_installment = None
+        self._confirmed_address = ""
+        self._confirmed_market = ""
+
+    @staticmethod
+    def _digest(value) -> str:
+        return hashlib.sha256(
+            json.dumps(value, ensure_ascii=False, sort_keys=True).encode("utf-8")
+        ).hexdigest()
+
+    def _require_cn_store(self) -> None:
+        """Login hosts may be allowed for auth; only the CN store can transact."""
+        parts = urlsplit(self._page().url)
+        host = parts.hostname or ""
+        if host in {"apple.com", "www.apple.com"} and parts.path.startswith("/cn/shop/"):
+            return
+        cn_host = host == "www.apple.com.cn" or re.fullmatch(
+            r"secure\d*\.www\.apple\.com\.cn", host
+        )
+        if not cn_host or not parts.path.startswith("/shop/"):
+            raise HumanRequired("当前页面不是 Apple 中国大陆商店，请返回国行商品页面")
+
+    def _validate_platform_url(self, url: str) -> None:
+        super()._validate_platform_url(url)
+        host = urlsplit(url).hostname or ""
+        known = {
+            "apple.com.cn",
+            "www.apple.com.cn",
+            "apple.com",
+            "www.apple.com",
+            "account.apple.com",
+            "appleid.apple.com",
+            "idmsa.apple.com",
+        }
+        if host not in known and not re.fullmatch(r"secure\d*\.www\.apple\.com\.cn", host):
+            raise ConfigurationError("Apple 导航主机尚未验证，请人工核对")
+
+    async def open_product(self, product_id: str, url: str) -> None:
+        try:
+            validate_platform_url(self.platform, url)
+        except ValueError:
+            raise ConfigurationError("Apple 商品入口必须属于中国大陆商店") from None
+        await super().open_product(product_id, url)
+
+    async def _address_fingerprint(self) -> str:
+        self._require_cn_store()
+        # The values remain process-local only long enough to hash. They never
+        # enter a model, log, screenshot, database or result payload.
+        values = await self._page().evaluate(
+            """keys => {
+                const visible=e=>e.getClientRects().length
+                    && getComputedStyle(e).visibility!=='hidden';
+                const fields=[...document.querySelectorAll('[data-autom^="form-field-"]')]
+                    .filter(visible).map(e=>[e.getAttribute('data-autom'),e.innerText.trim()])
+                    .filter(([,text])=>text);
+                if(!keys.every(key=>fields.filter(([name])=>name==='form-field-'+key).length===1))
+                    return null;
+                return fields.sort((a,b)=>JSON.stringify(a).localeCompare(JSON.stringify(b)));
+            }""",
+            ADDRESS_FIELDS,
+        )
+        if not values:
+            return ""
+        return self._digest(values)
+
+    async def confirm_address(self) -> dict:
+        async with self._lock:
+            await self._guard_human()
+            if urlsplit(self._page().url).path != "/shop/checkout":
+                raise HumanRequired("请先在结算回顾页核对收货地址")
+            fingerprint = await self._address_fingerprint()
+            if not fingerprint:
+                raise HumanRequired("当前收货地址摘要不完整，请在官网补齐并核对")
+            self._confirmed_address = fingerprint
+            return {"address_fingerprint": fingerprint, "address_confirmed": True}
+
+    async def _market_fingerprint(self) -> str:
+        self._require_cn_store()
+        sku = self.selected
+        if sku is None:
+            return ""
+        page = self._page()
+        product = self._locator("summary").filter(visible=True)
+        review = self._locator("bag_items").locator(SELECTORS["review_name"]).filter(visible=True)
+        names = await (product if await product.count() else review).all_inner_texts()
+        expected = normalized(f"{sku.model} {sku.capacity} {sku.color}")
+        if len(names) != 1 or normalized(names[0]) != expected:
+            return ""
+        # The explicit local confirmation is bound to this exact visible item.
+        # A CN URL alone is NOT product-version proof. Any version text visible
+        # in that item's summary is included in the binding, never a page footer.
+        versions = await page.evaluate(
+            """s => {
+              const roots=[...document.querySelectorAll(s.summary),
+                ...document.querySelectorAll(s.bag_items)].filter(e=>e.getClientRects().length);
+              const pattern=/\\b[A-Z0-9]{4,}\\/A\\b|国行|港版|美版|日版|海外版/gi;
+              return roots.flatMap(e=>(e.innerText.match(pattern)||[]));
+            }""",
+            SELECTORS,
+        )
+        if any(
+            version in {"港版", "美版", "日版", "海外版"}
+            or (version.upper().endswith("/A") and not version.upper().endswith("CH/A"))
+            for version in versions
+        ):
+            return ""
+        return self._digest(
+            [sku.id, sku.product_id, expected, str(sku.price), sorted(set(versions))]
+        )
+
+    async def confirm_market(self) -> dict:
+        async with self._lock:
+            await self._guard_human()
+            fingerprint = await self._market_fingerprint()
+            if not fingerprint:
+                raise HumanRequired("请在当前商品或结算页面核对型号、容量、颜色及国行版本")
+            self._confirmed_market = fingerprint
+            return {"market_evidence": "MANUAL_CN:" + fingerprint, "market_verified": True}
 
     def _page(self):
         page = self.manager.current_page(self.platform)
@@ -83,24 +209,33 @@ class AppleCNAdapter(InspectionAdapter):
 
     async def _snapshot(self):
         await self._guard_human()
+        self._require_cn_store()
         return await self._page().evaluate(PRODUCT_SNAPSHOT, SELECTORS)
 
     async def _choose(self, key, wanted):
         controls = self._locator(key)
+        if await controls.count() == 0:
+            raise SelectorNotFound("UNKNOWN: Apple " + key + " control group is missing")
         matches = []
+        complete_labels = True
         for control in await controls.all():
             info = await control.evaluate(
                 "e=>({value:e.value,label:Array.from(e.labels||[]).map(x=>x.innerText).join(' ')})"
             )
             label = info["label"].strip().split("\n")[0]
+            complete_labels = complete_labels and bool(label)
             if normalized(info["value"]) == normalized(wanted) or normalized(label) == normalized(
                 wanted
             ):
                 matches.append(control)
+        if not matches and complete_labels and key in {"model", "color", "capacity"}:
+            raise CandidateUnavailable("当前 Apple 商品没有目标规格")
         if len(matches) != 1:
             raise SelectorNotFound("UNKNOWN: requested Apple " + key + " is missing or ambiguous")
         await self._guard_human()
         control = matches[0]
+        if await control.is_disabled() and key in {"model", "color", "capacity"}:
+            raise CandidateUnavailable("当前 Apple 商品目标规格不可用")
         await expect(control).to_be_enabled()
         if not await control.is_checked():
             # Apple's styled labels and sticky bar can cover the native radio.
@@ -134,6 +269,8 @@ class AppleCNAdapter(InspectionAdapter):
 
     async def get_skus(self) -> list[SKU]:
         async with self._lock:
+            if self._cart_attempted or self._submit_attempted:
+                raise HumanRequired("已有加购或提交尝试，不能重新切换商品规格")
             try:
                 await self._guard_human()
                 self._page()
@@ -156,10 +293,12 @@ class AppleCNAdapter(InspectionAdapter):
                 for model in prefs.model_priority:
                     for capacity in prefs.capacity_priority:
                         for color in prefs.color_priority:
-                            sku = await self._configure(model, capacity, color)
-                            skus.append(sku)
+                            try:
+                                sku = await self._configure(model, capacity, color)
+                            except CandidateUnavailable:
+                                continue
                             if sku.available and sku.price <= prefs.max_price:
-                                return skus
+                                skus.append(sku)
                 return skus
             except (SelectorNotFound, PlaywrightTimeout):
                 await self._capture("sku_unknown", "WAITING_HUMAN")
@@ -172,11 +311,26 @@ class AppleCNAdapter(InspectionAdapter):
 
     async def select_sku(self, sku: SKU) -> None:
         async with self._lock:
+            if self._cart_attempted or self._submit_attempted:
+                raise HumanRequired("已有加购或提交尝试，不能重新切换商品规格")
             if sku.platform != self.platform or sku.product_id != self.product_id:
                 raise HumanRequired("Selected SKU belongs to a different product")
             actual = await self._configure(sku.model, sku.capacity, sku.color)
-            if actual.id != sku.id or actual.price != sku.price or not actual.available:
-                raise HumanRequired("Selected SKU price or availability changed")
+            if any(
+                getattr(actual, field) != getattr(sku, field)
+                for field in (
+                    "id",
+                    "platform",
+                    "product_id",
+                    "model",
+                    "capacity",
+                    "color",
+                    "currency",
+                )
+            ):
+                raise HumanRequired("Selected SKU identity changed")
+            if actual.price != sku.price or not actual.available:
+                raise CandidateUnavailable("当前商品价格或库存已变化，请尝试其他候选")
             self.selected = actual
 
     async def _bag_check(self, quantity: int):
@@ -207,6 +361,9 @@ class AppleCNAdapter(InspectionAdapter):
             await self._guard_human()
             if self.selected is None:
                 raise HumanRequired("Select and verify a SKU before adding to bag")
+            current_market = await self._market_fingerprint()
+            if not current_market or current_market != self._confirmed_market:
+                raise HumanRequired("请先在本机明确确认当前商品为国行版本")
             if quantity not in (1, 2):
                 raise HumanRequired("Apple 已验证流程只支持页面允许的 1 至 2 件")
             self._quantity = quantity
@@ -304,6 +461,7 @@ class AppleCNAdapter(InspectionAdapter):
         async with self._lock:
             await self._guard_human()
             page = self._page()
+            self._require_cn_store()
             if "/shop/checkout" != urlsplit(page.url).path:
                 raise SelectorNotFound("UNKNOWN: not on Apple checkout review")
             if (
@@ -344,7 +502,7 @@ class AppleCNAdapter(InspectionAdapter):
             return await self._read_review()
 
     async def _select_installments(self):
-        self._installment_verified_at = None
+        self._approved_installment = None
         if self.selected is None:
             raise HumanRequired("No selected product for installment verification")
         matches = []
@@ -365,14 +523,24 @@ class AppleCNAdapter(InspectionAdapter):
             raise SelectorNotFound("UNKNOWN: installment control identifier changed")
         term = self._page().locator('[data-autom="' + key + '-24"]')
         await expect(term).to_be_enabled()
-        label = await term.evaluate("e=>Array.from(e.labels||[]).map(l=>l.innerText).join(' ')")
-        verify_installment_offer(label, self.selected.price * self._quantity)
         if not await term.is_checked():
             await term.press("Space")
             await expect(term).to_be_checked()
-        self._installment_verified_at = monotonic()
+        # Only the selected radio's own visible label is a plan disclosure.
+        # Surrounding advertisements or another bank's terms cannot fill gaps.
+        label = await term.evaluate(
+            """e=>Array.from(e.labels||[])
+            .filter(l=>l.getClientRects().length && getComputedStyle(l).visibility!=='hidden')
+            .map(l=>l.innerText).join(' ')"""
+        )
+        self._approved_installment = verify_installment_offer(
+            self.installment_bank + " " + label,
+            self.selected.price * self._quantity,
+            bank=self.installment_bank,
+        )
 
     async def _read_review(self) -> OrderReview:
+        self._require_cn_store()
         sku = self.selected
         if sku is None:
             raise HumanRequired("No selected SKU to compare with order review")
@@ -390,23 +558,37 @@ class AppleCNAdapter(InspectionAdapter):
             raise HumanRequired("订单数量无效")
         line_total = money(await item.locator(SELECTORS["bag_price"]).inner_text())
         total = money(await self._locator("bag_total").inner_text())
-        address_present = await self._page().evaluate(
-            """keys => keys.every(key =>
-            Array.from(document.querySelectorAll('[data-autom="form-field-'+key+'"]'))
-              .some(e=>e.getClientRects().length && e.innerText.trim()))""",
-            ADDRESS_FIELDS,
+        address_fingerprint = await self._address_fingerprint()
+        address_confirmed = bool(
+            address_fingerprint and address_fingerprint == self._confirmed_address
         )
+        market_fingerprint = await self._market_fingerprint()
+        market_verified = bool(market_fingerprint and market_fingerprint == self._confirmed_market)
         logos = self._locator("review_payment")
         payment = [await logo.get_attribute("alt") for logo in await logos.all()]
+        financing = None
         if self.payment_method == "installments":
-            details = normalized(await self._locator("review_payment_details").inner_text())
-            if (
-                payment != [self.installment_bank]
-                or "24个月" not in details
-                or self._installment_verified_at is None
-                or monotonic() - self._installment_verified_at > 60
-            ):
+            if payment != [self.installment_bank] or self._approved_installment is None:
                 raise HumanRequired("订单的24期免息方案需要重新核对")
+            details = await (
+                self._locator("review_payment_details").filter(visible=True).inner_text()
+            )
+            current = verify_installment_offer(
+                self.installment_bank + " " + details, total, bank=self.installment_bank
+            )
+            if current != self._approved_installment:
+                raise HumanRequired("当前分期条款与已核验方案不符，请重新核对")
+            financing = FinancingOffer(
+                provider=current.bank,
+                terms=24,
+                principal=current.principal,
+                total_repayment=current.total,
+                interest=current.interest,
+                service_fee=current.fee,
+                verified_at=datetime.now(UTC),
+                state=FinancingState.ELIGIBLE,
+                selected=True,
+            )
         elif payment != ["微信支付"]:
             raise HumanRequired("订单付款方式不符合配置")
         return OrderReview(
@@ -419,10 +601,15 @@ class AppleCNAdapter(InspectionAdapter):
             unit_price=line_total / quantity,
             total_price=total,
             quantity=quantity,
-            address_present=address_present,
+            address_present=bool(address_fingerprint),
+            address_fingerprint=address_fingerprint,
+            address_confirmed=address_confirmed,
+            market_evidence="MANUAL_CN:" + market_fingerprint if market_verified else "",
+            market_verified=market_verified,
             verification_present=False,
             checkout_valid=await self._locator("submit_order").is_enabled(),
             line_items=1,
+            financing=financing,
         )
 
     async def _detect_verification(self) -> Verification:
@@ -465,6 +652,7 @@ class AppleCNAdapter(InspectionAdapter):
         if not after_submit and (expected is None or re.fullmatch(r"W\d+", expected) is None):
             return unknown
         page = self._page()
+        self._require_cn_store()
         if urlsplit(page.url).path != "/shop/checkout/thankyou":
             return unknown
         receipt = self._locator("order_confirmation")

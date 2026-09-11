@@ -49,7 +49,15 @@ SELECTORS: dict[str, str | None] = {
 NO_APPLECARE_LABEL = "不加 AppleCare+ 服务计划"
 LOGIN_URL = "https://secure.www.apple.com.cn/shop/account/home"
 EVIDENCE_STATUS = "CHROME_UNPAID_ORDER_VERIFIED_2026_09_10"
-ADDRESS_FIELDS = ("lastName", "firstName", "state", "city", "district", "street")
+LIVE_VALIDATION = {
+    "product": "LIVE_OBSERVED",
+    "cart": "LIVE_OBSERVED",
+    "checkout": "LIVE_OBSERVED",
+    "receipt": "WECHAT_ONLY_LIVE_OBSERVED",
+    "continue": "NOT_RUN",
+    "installment_full_disclosure": "NOT_RUN",
+}
+ADDRESS_FIELDS = ("lastName", "firstName", "state", "city", "district", "street", "countryCode")
 
 # Only rendered product controls. No cookies, page stores or private APIs.
 PRODUCT_SNAPSHOT = r"""(s) => {

@@ -9,7 +9,7 @@ from src.browser.groups import session_key
 from src.browser.manager import BrowserManager
 from src.core.clock import diagnostics
 from src.core.config import AppConfig, ProductTarget, validate_platform_url
-from src.core.engine import Engine
+from src.core.engine import Engine, finish_cleanup
 from src.core.exceptions import ConfigurationError
 from src.core.logging import setup_logging
 from src.core.models import OrderReview, Platform
@@ -43,6 +43,7 @@ class Runtime:
         self.task: asyncio.Task | None = None
         self._control = asyncio.Lock()
         self._session_status = {}
+        self._closed = False
 
     def _build_adapters(self):
         config = self.config
@@ -209,9 +210,26 @@ class Runtime:
                 raise ConfigurationError("该平台结算页尚无已验证的检查入口，请直接查看浏览器")
             return await reader()
 
+    async def confirm_checkout(self, platform: Platform, kind: str) -> dict:
+        """Bind an explicit local user's confirmation to the current visible page."""
+        if kind not in {"address", "market"}:
+            raise ConfigurationError("未知的确认项目")
+        async with self._control:
+            hold = self.engine.session_hold(platform)
+            if hold and hold["active_channel"] != platform.value:
+                raise ConfigurationError("请选择当前占用会话的平台")
+            if self.task and not self.task.done():
+                state = self.engine.snapshot()["platforms"].get(platform.value, {}).get("state")
+                if state != "WAITING_HUMAN":
+                    raise ConfigurationError("请等待流程暂停后，在当前页面核对并确认")
+            result = await getattr(self.adapters[platform], "confirm_" + kind)()
+            return {"status": "本次确认已绑定当前页面；页面变化后须重新确认", **result}
+
     async def start(self, platforms=None, immediate=False, dry_run=None) -> dict:
         async with self._control:
-            if self.task and not self.task.done():
+            if self._closed:
+                raise ConfigurationError("Runtime is closed")
+            if self.engine.running or (self.task and not self.task.done()):
                 raise ConfigurationError("Engine is already running")
             for channel in Platform:
                 self._require_session_idle(channel)
@@ -233,15 +251,22 @@ class Runtime:
             )
             return {"status": "started"}
 
+    async def _stop_locked(self) -> None:
+        async def stop_owned_tasks():
+            # Cancel the main task too: it may still be queued and have no workers yet.
+            if self.task and not self.task.done() and not self.task.cancelling():
+                self.task.cancel()
+            try:
+                await self.engine.stop()
+            finally:
+                if self.task:
+                    await asyncio.gather(self.task, return_exceptions=True)
+
+        await finish_cleanup(asyncio.create_task(stop_owned_tasks()))
+
     async def stop(self) -> dict:
         async with self._control:
-            # Cancel the main task too: it may still be queued and have no workers yet.
-            if self.task and not self.task.done():
-                self.task.cancel()
-            await self.engine.stop()
-            if self.task:
-                with contextlib.suppress(asyncio.CancelledError, Exception):
-                    await self.task
+            await self._stop_locked()
             return {"status": "stopped"}
 
     async def resume(self, platform=None) -> dict:
@@ -275,6 +300,16 @@ class Runtime:
         return result
 
     async def close(self) -> None:
-        await self.stop()
-        await self.manager.close()
-        self.database.close()
+        async with self._control:
+            if self._closed:
+                return
+
+            async def close_owned_resources():
+                await self._stop_locked()
+                await self.manager.close()
+                self.database.close()
+                self._closed = True
+
+            # Keep all three resources owned until closure actually succeeds.
+            # Caller cancellation waits; a real close failure remains retryable.
+            await finish_cleanup(asyncio.create_task(close_owned_resources()))

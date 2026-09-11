@@ -86,6 +86,10 @@ class ReviewAdapter:
             total_price=self.sku.price,
             quantity=1,
             address_present=True,
+            address_fingerprint="fixture-address",
+            address_confirmed=True,
+            market_evidence="fixture-mainland-version",
+            market_verified=True,
             checkout_valid=True,
             line_items=1,
             seller_id=self.sku.seller_id,
@@ -135,7 +139,7 @@ def configuration(tmp_path, *, dry_run=False, platforms=(Platform.APPLE,)):
                     "platforms": {
                         platform.value: {
                             "url": {
-                                Platform.APPLE: "https://apple.com/test",
+                                Platform.APPLE: "https://www.apple.com.cn/shop/buy-iphone/fixture",
                                 Platform.JD: "https://jd.com/test",
                                 Platform.TMALL: "https://detail.tmall.com/item.htm?id=fixture",
                                 Platform.TAOBAO: "https://item.taobao.com/item.htm?id=fixture",

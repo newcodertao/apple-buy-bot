@@ -10,6 +10,10 @@ class SelectorNotFound(HumanRequired):
     pass
 
 
+class CandidateUnavailable(BotError):
+    """Confirmed candidate failure before any cart or submission side effect."""
+
+
 class RetryableError(BotError):
     def __init__(self, message: str = "Temporary request failure", retry_after: float = 0):
         super().__init__(message)

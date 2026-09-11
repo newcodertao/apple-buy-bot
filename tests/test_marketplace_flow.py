@@ -99,6 +99,7 @@ def fixture_html(*, review_seller="fixture-seller"):
                 "review_discount": "0",
                 "review_shipping": "0",
                 "review_fees": "0",
+                "review_address_identity": "合成测试地址甲，不是真实地址",
             }.items()
         )
         + financing
@@ -145,7 +146,8 @@ class FixtureMarketplaceAdapter(MarketplaceAdapter):
             "cart_price cart_quantity cart_selected cart_total checkout review_items review_name "
             "review_item_id review_seller_id review_shop review_quantity review_unit_price "
             "review_region review_stock review_total review_subtotal review_discount "
-            "review_shipping review_fees review_address_selected submit_order financing_selected "
+            "review_shipping review_fees review_address_selected review_address_identity "
+            "submit_order financing_selected "
             "financing_provider financing_terms financing_interest financing_fee "
             "financing_principal financing_total receipt_order_id receipt_status receipt_item_id "
             "receipt_seller_id receipt_quantity receipt_total"
@@ -216,6 +218,8 @@ async def test_marketplace_local_cart_checkout_receipt_or_mismatch_without_repla
                 await adapter.submit_order()
             assert await page.evaluate("sessionStorage.getItem('submits')") is None
         else:
+            await adapter.confirm_address()
+            await adapter.confirm_market()
             review = await adapter.verify_order()
             assert review.financing.terms == 24
             assert review.financing.interest == review.financing.service_fee == 0

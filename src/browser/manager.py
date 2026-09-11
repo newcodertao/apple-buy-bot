@@ -110,13 +110,18 @@ class BrowserManager:
         async with self._lock:
             targets = list(self._sessions) if platform is None else [profile_platform(platform)]
             for target in targets:
-                session = self._sessions.pop(target, None)
+                session = self._sessions.get(target)
                 if session:
                     try:
                         if not session.closed.is_set():
                             await session.context.close()
+                            session.closed.set()
                     finally:
-                        session.lock.release()
+                        # Cancellation or an error is not proof Chrome closed.
+                        # Retain the context and its OS lock so a later close can retry.
+                        if session.closed.is_set():
+                            session.lock.release()
+                            self._sessions.pop(target, None)
             if not self._sessions and self._playwright:
                 await self._playwright.stop()
                 self._playwright = None

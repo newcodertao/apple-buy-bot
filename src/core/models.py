@@ -107,6 +107,10 @@ class OrderReview(Model):
     quantity: int = Field(gt=0)
     currency: str = "CNY"
     address_present: bool
+    address_fingerprint: str = ""
+    address_confirmed: bool = False
+    market_evidence: str = ""
+    market_verified: bool = False
     verification_present: bool = False
     checkout_valid: bool
     # Count ALL line items, including accessories, before allowing submit.

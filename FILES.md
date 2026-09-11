@@ -76,6 +76,11 @@ src/web/api.py
 src/web/app.py
 src/web/index.html
 tests/test_browser.py
+tests/test_audit_apple.py
+tests/test_audit_checkout.py
+tests/test_audit_engine.py
+tests/test_audit_privacy.py
+tests/test_audit_protected_run.py
 tests/test_apple_live_flow.py
 tests/test_checkout.py
 tests/test_cli_safety.py

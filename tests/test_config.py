@@ -71,13 +71,17 @@ def test_product_override_and_target_order():
             "products": {
                 "pro": {
                     "model": "iPhone 18 Pro",
-                    "platforms": {"apple": {"url": "https://www.apple.com/cn/"}},
+                    "platforms": {
+                        "apple": {"url": "https://www.apple.com.cn/shop/buy-iphone/fixture"}
+                    },
                 },
                 "max": {
                     "model": "iPhone 18 Pro Max",
                     "max_price": 12000,
                     "capacity_priority": ["256GB"],
-                    "platforms": {"apple": {"url": "https://www.apple.com/cn/"}},
+                    "platforms": {
+                        "apple": {"url": "https://www.apple.com.cn/shop/buy-iphone/fixture"}
+                    },
                 },
             }
         }

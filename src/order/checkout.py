@@ -155,6 +155,12 @@ def verify_checkout(
         raise OrderVerificationError("Checkout total exceeds the permitted total")
     if not review.address_present:
         raise OrderVerificationError("Checkout address requires confirmation")
+    if not review.address_confirmed or not review.address_fingerprint:
+        raise OrderVerificationError("Current checkout address needs explicit local confirmation")
+    if not review.market_verified or not review.market_evidence:
+        raise OrderVerificationError(
+            "Mainland product version needs evidence or human verification"
+        )
     if review.verification_present:
         raise OrderVerificationError("Checkout verification requires human action")
     if not review.checkout_valid or review.line_items != 1:

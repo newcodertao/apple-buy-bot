@@ -1,8 +1,9 @@
 from datetime import datetime
 from decimal import Decimal
 from pathlib import Path
+from posixpath import normpath
 from typing import Literal
-from urllib.parse import urlsplit
+from urllib.parse import unquote, urlsplit
 from zoneinfo import ZoneInfo, ZoneInfoNotFoundError
 
 import yaml
@@ -32,6 +33,13 @@ def validate_platform_url(platform: Platform, url: str) -> str:
         or not any(host == h or host.endswith("." + h) for h in ALLOWED_HOSTS[platform])
     ):
         raise ValueError(f"{platform}: expected an HTTPS URL on its official domain")
+    if platform == Platform.APPLE:
+        path = unquote(parts.path)
+        mainland_store = (
+            host in {"apple.com.cn", "www.apple.com.cn"} and path.startswith("/shop/")
+        ) or (host in {"apple.com", "www.apple.com"} and path.startswith("/cn/shop/"))
+        if not mainland_store or "\\" in path or normpath(path) != path.rstrip("/"):
+            raise ValueError("Apple product targets must use the mainland China storefront")
     return url
 
 
