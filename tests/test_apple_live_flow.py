@@ -1,9 +1,10 @@
 """Offline regressions from Chrome observations; these are not live acceptance."""
 
+import asyncio
 from decimal import Decimal
 
 import pytest
-from test_engine import make_engine
+from test_engine import make_engine, wait_state
 
 from src.browser.manager import BrowserManager
 from src.core.config import ProductPreferences
@@ -316,22 +317,30 @@ async def test_login_requires_real_signout_evidence(apple_page):
     await page.set_content('<nav id="globalnav"><a href="/shop/signOut">退出登录</a></nav>')
     assert await adapter.login_status() == LoginStatus.AUTHENTICATED
     await page.goto("http://127.0.0.1/shop/signIn")
+    await page.set_content('<label for="account">电子邮件或电话号码</label><input id="account">')
     assert await adapter.login_status() == LoginStatus.REQUIRED
     assert (await adapter.detect_verification()).reason == "login"
 
 
-async def test_public_monitoring_does_not_require_login_but_review_does(tmp_path):
+async def test_preparation_requires_login_before_public_monitoring(tmp_path):
     engine, adapters, db = make_engine(tmp_path, dry_run=True, max_checks=1)
     adapter = adapters[Platform.APPLE]
     adapter.public_states = AppleCNAdapter.public_states
     adapter.login = LoginStatus.UNKNOWN
     adapter.sku = adapter.sku.model_copy(update={"available": False})
+    task = asyncio.create_task(engine.run(immediate=True))
     try:
-        await engine.run(immediate=True)
+        await wait_state(engine, "WAITING_HUMAN")
+        assert "check_stock" not in adapter.calls
+        adapter.login = LoginStatus.AUTHENTICATED
+        await engine.resume()
+        await asyncio.wait_for(task, timeout=2)
         assert "check_stock" in adapter.calls
         assert "add_to_cart" not in adapter.calls
         assert not engine._login_required(Platform.APPLE, State.MONITORING)
         assert engine._login_required(Platform.APPLE, State.VERIFYING)
         assert db.guard_status() is None
     finally:
+        await engine.stop()
+        await asyncio.gather(task, return_exceptions=True)
         db.close()

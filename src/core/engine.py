@@ -11,7 +11,7 @@ from src.browser.groups import session_key
 from src.core.config import AppConfig
 from src.core.exceptions import CandidateUnavailable, HumanRequired, OrderRejected, RetryableError
 from src.core.logging import redact, safe_url
-from src.core.models import SKU, LoginStatus, Platform, PlatformStatus, State
+from src.core.models import SKU, CartState, LoginStatus, Platform, PlatformStatus, State
 from src.core.scheduler import Scheduler, backoff
 from src.core.state_machine import StateMachine
 from src.monitor.stock_monitor import polling_interval, wait_or_stop
@@ -81,6 +81,7 @@ class Engine:
         self._now = now or (lambda: datetime.now(UTC))
         self._waiter = waiter
         self._candidate_cooldowns: dict[tuple[Platform, str, str], datetime] = {}
+        self._login_attempted: set[Platform] = set()
 
     def snapshot(self) -> dict:
         now = self._now()
@@ -244,8 +245,11 @@ class Engine:
                 self._status[platform].login = login
                 verification = await self._call(platform, "detect_verification")
                 if (
-                    self._login_required(platform, next_state)
-                    and login != LoginStatus.AUTHENTICATED
+                    login == LoginStatus.REQUIRED
+                    or (
+                        self._login_required(platform, next_state)
+                        and login != LoginStatus.AUTHENTICATED
+                    )
                 ) or verification.required:
                     await self._notify("human_required", "登录或安全验证仍未完成", platform)
                     continue
@@ -257,19 +261,38 @@ class Engine:
         raise asyncio.CancelledError
 
     def _login_required(self, platform: Platform, state: State) -> bool:
-        return state not in getattr(self.adapters[platform], "public_states", ())
+        return state == State.PREPARING or state not in getattr(
+            self.adapters[platform], "public_states", ()
+        )
 
     async def _ensure_clear(self, platform: Platform, next_state: State) -> None:
         while True:
             try:
                 login = await self._call(platform, "login_status")
                 self._status[platform].login = login
+                verification = await self._call(platform, "detect_verification")
+                if verification.required and verification.reason != "login":
+                    raise HumanRequired("Security verification requires human action")
                 if (
-                    self._login_required(platform, next_state)
-                    and login != LoginStatus.AUTHENTICATED
+                    login == LoginStatus.REQUIRED
+                    and platform not in self._login_attempted
+                    and callable(getattr(self.adapters[platform], "try_login_from_env", None))
+                ):
+                    # Only the adapter's normal visible login flow may use local credentials.
+                    # A missing credential or challenge never permits a retry loop or navigation.
+                    self._login_attempted.add(platform)
+                    await self._call(platform, "try_login_from_env")
+                    login = await self._call(platform, "login_status")
+                    self._status[platform].login = login
+                    verification = await self._call(platform, "detect_verification")
+                if (
+                    login == LoginStatus.REQUIRED
+                    or (
+                        self._login_required(platform, next_state)
+                        and login != LoginStatus.AUTHENTICATED
+                    )
                 ):
                     raise HumanRequired("Login is required or unknown")
-                verification = await self._call(platform, "detect_verification")
                 if verification.required:
                     raise HumanRequired("Security verification requires human action")
                 return
@@ -281,13 +304,25 @@ class Engine:
         while True:
             try:
                 await self._ensure_clear(platform, state)
-                await self._call(platform, name, *args)
+                if name == "add_to_cart" and platform == Platform.APPLE:
+                    adapter = self.adapters[platform]
+                    cart_state = getattr(adapter, "cart_state", None)
+                    if cart_state is None:
+                        raise HumanRequired("Apple cart status is unavailable; inspect the page")
+                    if cart_state == CartState.NOT_ATTEMPTED:
+                        await self._call(platform, name, *args)
+                    if adapter.cart_state != CartState.CART_VERIFIED:
+                        await self._call(platform, "verify_cart", *args)
+                    if adapter.cart_state != CartState.CART_VERIFIED:
+                        raise HumanRequired("Cart item and quantity still require verification")
+                else:
+                    await self._call(platform, name, *args)
                 return
             except (HumanRequired, RetryableError, TimeoutError, ConnectionError) as exc:
-                # Repeating an ambiguous cart click could increase quantity. The user
-                # checks the cart; resume continues to checkout and verifies its total.
                 await self._pause(platform, state, _failure_reason(exc))
-                if name == "add_to_cart":
+                # Other channels retain their existing no-replay protection and checkout
+                # review. Apple additionally proves the exact bag before announcing success.
+                if name == "add_to_cart" and platform != Platform.APPLE:
                     return
 
     async def _review(self, platform: Platform, sku: SKU):
@@ -630,6 +665,7 @@ class Engine:
         self._stop.clear()
         self._joining = None
         self._candidate_cooldowns.clear()
+        self._login_attempted.clear()
         self._dry_run = self.config.app.dry_run or dry_run is True
         self._immediate = bool(immediate)
         self._sale_time = None if immediate else self.config.sale.target()

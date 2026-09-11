@@ -8,6 +8,7 @@ from src.core.engine import Engine
 from src.core.exceptions import HumanRequired, RetryableError, SelectorNotFound
 from src.core.models import (
     SKU,
+    CartState,
     FinancingOffer,
     FinancingState,
     LoginStatus,
@@ -44,6 +45,7 @@ class FakeAdapter(PlatformAdapter):
         self.second_review_updates = {}
         self.review_count = 0
         self.cart_error = None
+        self.cart_state = CartState.NOT_ATTEMPTED
         self.submit_wait = None
         self.active = 0
         self.max_active = 0
@@ -93,8 +95,14 @@ class FakeAdapter(PlatformAdapter):
 
     async def add_to_cart(self, quantity):
         await self.tick("add_to_cart")
+        self.cart_state = CartState.ATTEMPTED_UNKNOWN
         if self.cart_error:
             raise self.cart_error
+        self.cart_state = CartState.CART_VERIFIED
+
+    async def verify_cart(self, quantity):
+        await self.tick("verify_cart")
+        self.cart_state = CartState.CART_VERIFIED
 
     async def goto_checkout(self):
         await self.tick("goto_checkout")
@@ -327,6 +335,7 @@ async def test_ambiguous_cart_action_is_not_repeated_on_resume(tmp_path):
     await engine.resume()
     await asyncio.wait_for(task, timeout=2)
     assert adapter.calls.count("add_to_cart") == 1
+    assert adapter.calls.count("verify_cart") == 1
     assert adapter.calls.count("submit_order") == 1
 
 

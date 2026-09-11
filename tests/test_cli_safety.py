@@ -23,6 +23,9 @@ class ConsoleRuntime:
         self.hold_observed = asyncio.Event()
         self.resume_calls = 0
 
+    def plan_snapshot(self):
+        return {"products": [], "approved": False, "digest": "fixture-plan"}
+
     async def start(self, platforms, immediate=False, dry_run=None):
         async def worker():
             self.worker_started.set()

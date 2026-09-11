@@ -1,6 +1,94 @@
 # Apple 实页适配验收
 
-## 2026-09-11 审核修复：基线 65ee279（本轮）
+## 2026-09-11 购买计划与登录恢复（本轮，基线 1a330c8）
+
+开工实际 HEAD：`1a330c80880aade9200549741e1226679ae63caa`，`git status --short` 为空。未覆盖用户未提交工作。本轮沿用现有工程，不扩平台。最终提交号及推送核对见本次交付回复；本节的结果与下方历史审核分开。
+
+**当前不能宣称“真实购买流程可用”。** 新增验收从正常 Runtime 启动，首次登录和批准均发生在启动之后，使用真实 Engine 与 AppleCNAdapter，但页面仍为离线合成内容。程序专用 profile 的真实官网演练受本机既有 SUCCESS 订单锁阻断，不替换数据库或清锁来继续。
+
+### 变更与原因
+
+| 文件 | 本轮功能与边界 |
+|---|---|
+| `src/order/plan.py`、`src/runtime.py` | 本地批准计划包含入口链接及其摘要、允许型号/规格、数量、单价/总额上限、币种、付款方式、银行和地址依据。地址/版本仅存摘要。计划配置相同可复用，变化撤销批准。原子保存失败不发布新批准；商品配置先准备新对象再发布，防止新链接搭配旧批准。Runtime.start 复用现有 Adapter，已有加购/提交标志不能重置 |
+| `src/core/models.py`、`src/core/engine.py`、`src/platforms/apple_cn/adapter.py` | 显式区分 NOT_ATTEMPTED、ATTEMPTED_UNKNOWN、CART_VERIFIED；点击前暂停可执行第一次加购；已点击后只读现有袋。只有单行目标商品、数量、行金额、总额和无错误全部匹配才进入结算。未知状态不重复加购。每次准备和暂停恢复重查实际登录；异常时停止动作，保留待核对页面 |
+| `src/browser/manager.py`、`session.py`、Apple `selectors.py` | 优先复用程序 persistent profile。可选本机 `APPLE_BUY_BOT_STORAGE_STATE_FILE`，仅接受受支持的 Cookie 和 Playwright cookies/origins/localStorage JSON，合并缺项，不清空或覆盖已有项。待导入 context 离线启动并阻止 Service Worker 接管，合并成功后才联网；普通 profile 保持原启动策略。一次导入标记不代表登录通过。登录页区分表单未就绪/就绪/错误；网络诊断只留主文档/iframe 的域类别、状态码及故障类别，不留 URL 查询、正文或账户值 |
+| `src/main.py`、`src/web/api.py`、`src/web/index.html` | CLI 展示计划，支持 plan/approve-plan；Web 显式本机批准绑定展示版本。API 不能开启提交，不能用批准重启已结束的购买。首次地址/国行确认后保存本地摘要，实际变化才重新确认 |
+
+### 从正常 Runtime 入口逐步验收
+
+`tests/test_runtime_purchase_plan.py::test_runtime_first_login_plan_product_address_and_resume` 使用临时数据库、临时正式 Chrome profile、浏览器 offline 和全路由合成 HTML。被记录的方法均调用真正 Adapter 实现；只替换网页传输，不提前调用 Adapter 或注入批准。
+
+| 步骤 | 实际入口/方法 | 本地合成页面结果与人工操作 | 本轮真实官网 |
+|---|---|---|---|
+| 启动 | `Runtime.start` → `Engine.run/_prepare` → `open_product` | 启动时无页面、无批准 | **BLOCKED**：CLI 正常调用 Runtime.start，由原 SUCCESS guard 在工作者/浏览器启动前拦截，退出 2 |
+| 首次登录 | `login_status`、`Runtime.check_login`、`Runtime.resume` | REQUIRED/UNKNOWN 暂停；合成用户点击登录完成后实际账户控件为 AUTHENTICATED，恢复同一任务 | NOT RUN |
+| 计划与商品 | `Runtime.approve_plan`、`check_stock/get_skus`、`select_sku`、`Runtime.confirm_checkout(market)` | 首次计划暂停与首次国行确认均经 Runtime 显式批准；测试商品 iPhone 17 256GB 黑色 1 件，CNY 6799 | NOT RUN |
+| 加购与购物袋 | `add_to_cart`、`_bag_check`；未知分支 `verify_cart` | 主流程加购 1 次；正确商品/数量/金额后 CART_VERIFIED。另例先确认再首次点击，或已点击结果未知仅查袋，错误数量/金额仍暂停 | NOT RUN |
+| 结算 | `goto_checkout` → `verify_order` | 实际合成购物袋进入合成 checkout；点击结算 1 次 | NOT RUN |
+| 首次地址与金额/付款 | `Runtime.confirm_checkout(address)` → `verify_order/_read_review` | 首次地址暂停后由本地确认入口批准；仅摘要保存。合成流程使用微信人工付款方式；完整 24 期金额仍由原解析/页面用例验证，不冒充实页分期验收 | NOT RUN |
+| 就绪 | Engine `_purchase` → READY_TO_SUBMIT | dry_run=true，submit_order 调用 0、付款点击 0；页面保留，临时 CLAIMED 锁仍在。stop 后也不能重建 Adapter 重放购物车 | NOT RUN |
+
+### 统一测试与实机入口
+
+运行环境：本仓库 `.venv`，Python 3.14.5、pytest 9.1.1，浏览器测试使用正式 Chrome 与独立临时目录。全量命令进程内清除三个凭据相关环境变量，不修改用户全局环境；测试只用合成凭据。以下是最终同一版代码的完整结果，之后仅更新文档：
+
+| 检查 | 结果 | 本机证据 |
+|---|---|---|
+| 最终完整 pytest | **PASS：262 passed，0 failed、0 skipped，3 warnings，75.11 秒** | `outputs/runtime-purchase-verified.txt/.xml` |
+| Ruff | **PASS**：src tests，退出 0 | `outputs/runtime-ruff.txt` |
+| compileall | **PASS**：src tests，退出 0 | `outputs/runtime-compile.txt` |
+| 网页脚本语法 | **PASS**：提取当前 HTML 的 script 后 node --check，退出 0 | `outputs/runtime-web-script.js`；非浏览器 UI 验收 |
+| 本机真实配置 CLI | **BLOCKED**：正常 `dry-run apple`，退出 2，原 SUCCESS 锁阻止启动购买工作者 | `outputs/runtime-live-entry.txt`，未导航或改变购物袋 |
+| 原 guard 全字段比对 | **PASS**：1 条 SUCCESS，摘要与开工基线一致 | `outputs/runtime-guard-after.json`、`runtime-purchase-baseline.json` |
+| 本机 8766 服务 | **PASS（HTTP/API）**：空闲服务安全刷新，计划/批准按钮/登录诊断已加载，dry_run=true、auto_submit=false、计划尚未批准，guard=SUCCESS | `outputs/runtime-service.json`；本轮没有用浏览器点击网页控件 |
+
+3 条警告为旧有的 Starlette/AnyIO 弃用提示及一个市场平台假对象的 Decimal 序列化提示，未改无关依赖。旧 8766 的 PID 18196 确认 running=false 且无子进程后才停止；新服务 PID 45196。旧 8765 及其页面未关闭。
+
+真实入口使用本机配置：iPhone 18 Pro Max 优先、Pro 备选，512GB/256GB/1TB，黑色/银色/冰川蓝色/勃艮第酒红色，1 件，单价和总额上限均 CNY 15000，建设银行 24 期零利息零手续费。已在执行前说明预期动作；本轮没有批准该实际计划，也没有越过原锁。原 guard 的完整行摘要为 `3c00c641d5215b0e570ab8aad8f424ae3c6d135d190aeb4f8b0ed710dc55af08`。首个比对脚本误用字典行序列化，改用与基线一致的 `json.dumps(fetchall_tuple_rows, sort_keys=True)` 后匹配；两种表示不同不代表数据库变化，证据文件记录了这一差异。
+
+此前未完成的全量及红测保留如下，不与最终通过数拼接：
+
+- 初次 260 项全量在旧 ReviewAdapter 假对象缺少购物袋状态处无限等待，核对 PID 后仅终止该测试进程；`outputs/runtime-purchase-full.txt` 为 **INCOMPLETE**，没有全量 PASS。加入超时复现后 6 FAIL / 2 PASS；补齐假对象真实语义后 8 PASS / 0.77 秒，未放宽 Engine 保护。
+- 第二次完整 261 项：**3 FAIL / 258 PASS，72.75 秒**。`outputs/runtime-purchase-final.txt/.xml` 保留原始结果。失败分别为全局 100ms 超时误伤真实加购点击、旧假页面缺少 url、暂停提示文字不兼容。将故障注入限定到加购后的袋响应、补齐假对象 URL、保留“运行中”提示；对应 8 项通过（4.61 秒）。
+- 计划集成定向：4 PASS / 6.37 秒，`outputs/runtime-plan-final.xml`；包含首次正常 Runtime 流程、重建复用/配置变化失效、API 精确批准、保存失败原状态不变。
+- 登录导入隔离定向：5 PASS / 10.34 秒，`outputs/local-login-state-isolation.txt/.xml`，纳入最终全量。检查生产启动参数及本机 TCP 连接：导入完成前被离线阻止、完成后才可连接。新增夹具首轮因 Chrome 错误页 navigator.onLine 判断不可靠而 1 FAIL / 4 PASS，改为实际连接证明。既有 Apple 四例和 Engine/CLI 41 例定向通过均仅为调试结果，不代替全量。
+
+### 本轮实际命令
+
+下列命令在 `D:\Apple\apple-buy-bot` 的 pwsh 捕获通道运行；`python` 指 `.venv\Scripts\python.exe`。登录状态测试和完整 pytest 进程中移除 `APPLE_BUY_BOT_STORAGE_STATE_FILE`、`APPLE_BUY_BOT_USERNAME`、`APPLE_BUY_BOT_PASSWORD`，不读取或覆盖用户凭据。
+
+```text
+git status --short
+git rev-parse HEAD
+python -m pytest tests/test_runtime_purchase_plan.py -q --tb=short --junitxml=outputs/runtime-plan-final.xml
+python -m pytest --collect-only -q
+python -m pytest tests/test_regression_review.py -vv --tb=short
+python -m pytest tests/test_apple_cart_resume.py tests/test_session_control.py -q --tb=short --junitxml=outputs/runtime-fixture-fixes.xml
+python -m pytest -q tests/test_local_login_state.py --junitxml=outputs/local-login-state-isolation.xml
+python -m pytest -v --tb=short -o faulthandler_timeout=45 --junitxml=outputs/runtime-purchase-verified.xml
+python -m ruff check src tests
+python -m compileall -q src tests
+node --check outputs/runtime-web-script.js
+python -m src.main dry-run apple
+python -u -m src.main web --port 8766
+Invoke-RestMethod -Uri 'http://127.0.0.1:8766/status'
+Invoke-RestMethod -Uri 'http://127.0.0.1:8766/purchase-plan'
+Invoke-RestMethod -Uri 'http://127.0.0.1:8766/health'
+Invoke-WebRequest -Uri 'http://127.0.0.1:8766/'
+git diff --check
+```
+
+另外通过 sqlite3 `mode=ro` 读取 guard 并比较摘要；通过 Get-NetTCPConnection/Get-CimInstance 核对服务归属及子进程，Stop-Process 仅停止已确认的本轮挂起测试 PID 48488 和空闲旧 8766 服务 PID 18196。没有清理用户 Chrome/profile/购物袋。所有本轮详细输出只保留在 Git 忽略的 outputs/。
+
+### 本轮未实现或未执行
+
+- **NOT RUN / 未实现**：账号密码自动填表。真实密码与登录提交控件没有新页面证据，`try_login_from_env` 明确返回 NOT_RUN，不读取用户名/密码环境变量，不写猜测选择器。可用入口为人工登录程序 profile 或导入受支持的本机状态文件，仍需实际认证。
+- **NOT RUN / 未实现**：Apple 新品 Continue 后续分支；没有新的真实页面证据，保持暂停。普通 Chrome 已登录不意味着程序 profile 已登录，也不是程序链路验收。
+- **不支持**：裸 Token、私有鉴权接口、任意域登录状态和含 IndexedDB/其他未适配字段的“完整”状态文件；拒绝并提示格式不支持，不把部分导入说成完整登录。
+- **NOT RUN**：真实账号登录成功、真实商品规格/购物袋/结算/完整分期方案及 READY_TO_SUBMIT。本轮没有新订单、付款、取消订单或银行授权，未清现有购物袋/profile/数据库/订单锁。
+
+## 2026-09-11 审核修复：基线 65ee279（历史轮次）
 
 本轮仅修复既有流程、隐私和验证缺陷，不增加平台。开始时实际 `HEAD` 为 `65ee279dffab5ac50cd305cf7d5bd55d53c38f44`，`git status --short` 为空，无用户未提交工作。以下结果均来自本轮执行；后面的历史记录不能替代本轮或程序独立 profile 的验收。交付提交号以本轮完成后的 `git log -1` 和交付回复为准；未推送远端。
 

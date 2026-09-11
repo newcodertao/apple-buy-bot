@@ -1,6 +1,7 @@
 """Session controls preserve the run and use the same program profile."""
 
 import asyncio
+from types import SimpleNamespace
 from unittest.mock import AsyncMock
 
 import pytest
@@ -34,7 +35,7 @@ async def test_busy_login_controls_do_not_navigate(runtime, monkeypatch):
 
 
 async def test_manual_login_and_status_never_claim_success_from_opening(runtime, monkeypatch):
-    page = object()
+    page = SimpleNamespace(url="https://www.apple.com.cn/shop/buy-iphone/local-fixture")
     open_visible = AsyncMock(return_value=page)
     monkeypatch.setattr(runtime.manager, "open_visible", open_visible)
     adapter = runtime.adapters[Platform.APPLE]

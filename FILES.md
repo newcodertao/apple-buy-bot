@@ -45,6 +45,7 @@ src/notify/console.py
 src/order/__init__.py
 src/order/checkout.py
 src/order/lock.py
+src/order/plan.py
 src/order/priority.py
 src/order/sku_matcher.py
 src/platforms/__init__.py
@@ -82,6 +83,8 @@ tests/test_audit_engine.py
 tests/test_audit_privacy.py
 tests/test_audit_protected_run.py
 tests/test_apple_live_flow.py
+tests/test_apple_cart_resume.py
+tests/test_cart_runtime_engine.py
 tests/test_checkout.py
 tests/test_cli_safety.py
 tests/test_cli_web.py
@@ -89,12 +92,14 @@ tests/test_config.py
 tests/test_engine.py
 tests/test_inspect_cli.py
 tests/test_logging.py
+tests/test_local_login_state.py
 tests/test_marketplace_contracts.py
 tests/test_marketplace_engine.py
 tests/test_marketplace_flow.py
 tests/test_marketplace_judgments.py
 tests/test_priority.py
 tests/test_regression_review.py
+tests/test_runtime_purchase_plan.py
 tests/test_scheduler.py
 tests/test_session_control.py
 tests/test_state_machine.py
@@ -102,5 +107,5 @@ tests/test_storage.py
 VALIDATION.md
 ```
 
-运行时数据：data/database.db、data/profiles/{apple,jd,tmall}/、logs/、screenshots/。淘宝与天猫共用 tmall 会话目录。
+运行时数据：data/database.db、data/purchase-plan.json、data/profiles/{apple,jd,tmall}/、logs/、screenshots/。购买计划保存本机批准条件及地址/国行摘要；淘宝与天猫共用 tmall 会话目录。可选 Apple 登录状态导入文件仅由本机环境变量指定，不纳入仓库。
 验收证据：outputs/，索引详见 VALIDATION.md。

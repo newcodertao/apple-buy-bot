@@ -28,6 +28,10 @@ SELECTORS: dict[str, str | None] = {
     "bag_error": '[data-autom="bag-error-message"]',
     "checkout": '[id="shoppingCart.actions.checkout"]',
     "signin": "#signin-container",
+    # The username's accessible label was observed on the normal Apple sign-in.
+    # Password/submit controls have no trusted live selector evidence yet.
+    "login_password": None,
+    "login_submit": None,
     "authenticated": '#globalnav a[href*="/shop/signOut"]',
     "login_link": '#globalnav a[href*="/shop/signIn"]',
     "fulfillment_continue": '[data-autom="fulfillment-continue-button"]',
@@ -48,6 +52,9 @@ SELECTORS: dict[str, str | None] = {
 }
 NO_APPLECARE_LABEL = "不加 AppleCare+ 服务计划"
 LOGIN_URL = "https://secure.www.apple.com.cn/shop/account/home"
+BAG_URL = "https://www.apple.com.cn/shop/bag"
+LOGIN_USERNAME_LABEL = "电子邮件或电话号码"
+LOGIN_AUTH_HOSTS = ("account.apple.com", "appleid.apple.com", "idmsa.apple.com")
 EVIDENCE_STATUS = "CHROME_UNPAID_ORDER_VERIFIED_2026_09_10"
 LIVE_VALIDATION = {
     "product": "LIVE_OBSERVED",

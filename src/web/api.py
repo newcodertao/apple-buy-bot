@@ -38,6 +38,12 @@ class ConfirmationRequest(SessionRequest):
     confirmed: Literal[True]
 
 
+class PlanApprovalRequest(BaseModel):
+    model_config = ConfigDict(extra="forbid")
+    digest: str
+    confirmed: Literal[True]
+
+
 class TargetRequest(ProductRequest):
     target: ProductTarget
 
@@ -125,6 +131,19 @@ async def health(request: Request):
 async def start(request: Request, body: StartRequest):
     try:
         return await request.app.state.runtime.start(body.platforms, body.immediate, body.dry_run)
+    except BotError as exc:
+        raise HTTPException(409, str(exc)) from None
+
+
+@router.get("/purchase-plan")
+async def purchase_plan(request: Request):
+    return request.app.state.runtime.plan_snapshot()
+
+
+@router.post("/approve-plan")
+async def approve_plan(request: Request, body: PlanApprovalRequest):
+    try:
+        return await request.app.state.runtime.approve_plan(body.digest)
     except BotError as exc:
         raise HTTPException(409, str(exc)) from None
 

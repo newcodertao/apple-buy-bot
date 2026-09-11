@@ -9,6 +9,7 @@ from src.core.engine import Engine
 from src.core.exceptions import ConfigurationError
 from src.core.models import (
     SKU,
+    CartState,
     FinancingOffer,
     FinancingState,
     LoginStatus,
@@ -32,6 +33,8 @@ class ReviewAdapter:
         self.login_checked = asyncio.Event()
         self.submits = 0
         self.checks = 0
+        self.cart_state = CartState.NOT_ATTEMPTED
+        self.bag = []
         self.sku = SKU(
             id="test-sku",
             platform=platform,
@@ -69,7 +72,14 @@ class ReviewAdapter:
         return None
 
     async def add_to_cart(self, quantity):
-        return None
+        self.cart_state = CartState.ATTEMPTED_UNKNOWN
+        self.bag.append((self.sku.id, quantity, self.sku.price * quantity))
+        await self.verify_cart(quantity)
+
+    async def verify_cart(self, quantity):
+        # The local adapter proves the fixture line and quantity before reporting success.
+        assert self.bag == [(self.sku.id, quantity, self.sku.price * quantity)]
+        self.cart_state = CartState.CART_VERIFIED
 
     async def goto_checkout(self):
         return None
@@ -162,9 +172,12 @@ async def test_configured_dry_run_cannot_be_disabled_by_call_override(tmp_path):
     database = Database(tmp_path / "audit.db")
     try:
         engine = Engine(configuration(tmp_path, dry_run=True), {Platform.APPLE: adapter}, database)
-        await engine.run(immediate=True, dry_run=False)
+        await asyncio.wait_for(engine.run(immediate=True, dry_run=False), timeout=1)
         assert adapter.submits == 0
         assert engine.snapshot()["dry_run"] is True
+        assert engine.snapshot()["platforms"]["apple"]["state"] == "READY_TO_SUBMIT"
+        assert adapter.cart_state == CartState.CART_VERIFIED
+        assert database.guard_status()["status"] == "CLAIMED"
     finally:
         database.close()
 

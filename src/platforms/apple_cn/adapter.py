@@ -18,6 +18,7 @@ from src.core.exceptions import (
 )
 from src.core.models import (
     SKU,
+    CartState,
     FinancingOffer,
     FinancingState,
     LoginStatus,
@@ -31,6 +32,9 @@ from src.order.checkout import verify_checkout
 from src.platforms.apple_cn.parser import money, normalized, parse_skus, verify_installment_offer
 from src.platforms.apple_cn.selectors import (
     ADDRESS_FIELDS,
+    BAG_URL,
+    LOGIN_AUTH_HOSTS,
+    LOGIN_USERNAME_LABEL,
     NO_APPLECARE_LABEL,
     PRODUCT_SNAPSHOT,
     SELECTORS,
@@ -69,6 +73,7 @@ class AppleCNAdapter(InspectionAdapter):
         self.preferences: dict[str, ProductPreferences] = preferences or {}
         self.selected: SKU | None = None
         self._cart_attempted = False
+        self._cart_state = CartState.NOT_ATTEMPTED
         self._quantity = 1
         self._allow_submit = allow_submit
         self._submit_attempted = False
@@ -78,6 +83,35 @@ class AppleCNAdapter(InspectionAdapter):
         self._approved_installment = None
         self._confirmed_address = ""
         self._confirmed_market = ""
+        self.purchase_plan = None
+
+    @property
+    def cart_state(self) -> CartState:
+        # Preserve older callers which recorded the irreversible click intent
+        # through _cart_attempted before the three-state API existed.
+        if self._cart_attempted and self._cart_state == CartState.NOT_ATTEMPTED:
+            return CartState.ATTEMPTED_UNKNOWN
+        return self._cart_state
+
+    def _require_plan(self, sku: SKU, quantity: int) -> None:
+        if self.purchase_plan is not None:
+            self.purchase_plan.require(sku, quantity, self.payment_method, self.installment_bank)
+
+    def _address_approved(self, fingerprint: str) -> bool:
+        expected = (
+            self.purchase_plan.address_fingerprint
+            if self.purchase_plan is not None
+            else self._confirmed_address
+        )
+        return bool(fingerprint and fingerprint == expected)
+
+    def _market_approved(self, fingerprint: str) -> bool:
+        approved = (
+            self.purchase_plan.market_fingerprints
+            if self.purchase_plan is not None
+            else [self._confirmed_market]
+        )
+        return bool(fingerprint and fingerprint in approved)
 
     @staticmethod
     def _digest(value) -> str:
@@ -269,7 +303,7 @@ class AppleCNAdapter(InspectionAdapter):
 
     async def get_skus(self) -> list[SKU]:
         async with self._lock:
-            if self._cart_attempted or self._submit_attempted:
+            if self.cart_state != CartState.NOT_ATTEMPTED or self._submit_attempted:
                 raise HumanRequired("已有加购或提交尝试，不能重新切换商品规格")
             try:
                 await self._guard_human()
@@ -311,10 +345,11 @@ class AppleCNAdapter(InspectionAdapter):
 
     async def select_sku(self, sku: SKU) -> None:
         async with self._lock:
-            if self._cart_attempted or self._submit_attempted:
+            if self.cart_state != CartState.NOT_ATTEMPTED or self._submit_attempted:
                 raise HumanRequired("已有加购或提交尝试，不能重新切换商品规格")
             if sku.platform != self.platform or sku.product_id != self.product_id:
                 raise HumanRequired("Selected SKU belongs to a different product")
+            self._require_plan(sku, self.preferences[sku.product_id].quantity)
             actual = await self._configure(sku.model, sku.capacity, sku.color)
             if any(
                 getattr(actual, field) != getattr(sku, field)
@@ -334,6 +369,9 @@ class AppleCNAdapter(InspectionAdapter):
             self.selected = actual
 
     async def _bag_check(self, quantity: int):
+        self._require_cn_store()
+        if self.cart_state == CartState.CART_VERIFIED:
+            self._cart_state = CartState.ATTEMPTED_UNKNOWN
         sku = self.selected
         if sku is None:
             raise HumanRequired("No verified SKU selected")
@@ -355,23 +393,47 @@ class AppleCNAdapter(InspectionAdapter):
             or error.strip()
         ):
             raise HumanRequired("购物袋商品、数量、金额或库存异常，请人工核对")
+        if quantity == self._quantity:
+            self._cart_state = CartState.CART_VERIFIED
+
+    async def verify_cart(self, quantity: int) -> None:
+        """Recover an uncertain add by reading the existing bag, never adding again."""
+        async with self._lock:
+            await self._guard_human()
+            self._require_cn_store()
+            if quantity not in (1, 2) or self.selected is None:
+                raise HumanRequired("缺少可核验的目标商品和数量")
+            self._quantity = quantity
+            if self.cart_state == CartState.CART_VERIFIED:
+                self._cart_state = CartState.ATTEMPTED_UNKNOWN
+            if not await self._locator("bag").is_visible():
+                view_bag = self._locator("view_bag")
+                if await view_bag.is_visible():
+                    async with self.navigation_guard(self._page()):
+                        await view_bag.click()
+                        await self._locator("bag").wait_for(state="visible")
+                else:
+                    await self._navigate(self._page(), BAG_URL)
+            await self._guard_human()
+            await self._bag_check(quantity)
 
     async def add_to_cart(self, quantity: int) -> None:
         async with self._lock:
             await self._guard_human()
             if self.selected is None:
                 raise HumanRequired("Select and verify a SKU before adding to bag")
-            current_market = await self._market_fingerprint()
-            if not current_market or current_market != self._confirmed_market:
-                raise HumanRequired("请先在本机明确确认当前商品为国行版本")
             if quantity not in (1, 2):
                 raise HumanRequired("Apple 已验证流程只支持页面允许的 1 至 2 件")
             self._quantity = quantity
+            self._require_plan(self.selected, quantity)
             if await self._locator("bag").is_visible():
                 await self._bag_check(quantity)
                 return
-            if self._cart_attempted:
+            if self.cart_state != CartState.NOT_ATTEMPTED:
                 raise HumanRequired("已尝试加购，请人工核对购物袋；禁止重复点击")
+            current_market = await self._market_fingerprint()
+            if not self._market_approved(current_market):
+                raise HumanRequired("请先在本机明确确认当前商品为国行版本")
             # An enabled button alone is insufficient when the site's delivery
             # component failed (observed HTTP 541 in the isolated live profile).
             # Leave the browser for ordinary manual recovery, without an add.
@@ -402,6 +464,7 @@ class AppleCNAdapter(InspectionAdapter):
                 # The pre-order Continue branch has not yet become accessible.
                 raise SelectorNotFound("UNKNOWN: this Apple Continue step needs live verification")
             self._cart_attempted = True
+            self._cart_state = CartState.ATTEMPTED_UNKNOWN
             await add.click()
             try:
                 await self._locator("view_bag").wait_for(state="visible")
@@ -431,6 +494,11 @@ class AppleCNAdapter(InspectionAdapter):
 
     async def login_status(self) -> LoginStatus:
         async with self._lock:
+            page = self.manager.current_page(self.platform)
+            if page is not None and re.search(
+                r"/shop/signin(?:/|$)", urlsplit(page.url).path, re.I
+            ):
+                return LoginStatus((await self._login_component())["status"])
             verification = await self._detect_verification()
             if verification.reason == "login":
                 return LoginStatus.REQUIRED
@@ -456,6 +524,65 @@ class AppleCNAdapter(InspectionAdapter):
                 if opened and await menu.get_attribute("aria-expanded") == "true":
                     await menu.press("Enter")
             return LoginStatus.UNKNOWN
+
+    async def _login_component(self) -> dict:
+        page = self._page()
+        # Only booleans/roles are read. No usernames, values, or private errors
+        # are extracted from an authentication frame.
+        ready = False
+        error = False
+        for frame in page.frames:
+            if frame is not page.main_frame:
+                if (urlsplit(frame.url).hostname or "") not in LOGIN_AUTH_HOSTS:
+                    continue
+                try:
+                    if not await (await frame.frame_element()).is_visible():
+                        continue
+                except Exception:
+                    continue
+            try:
+                username = frame.get_by_role("textbox", name=LOGIN_USERNAME_LABEL, exact=True)
+                if await username.count() == 1:
+                    ready = ready or (await username.is_visible() and await username.is_enabled())
+                container = frame.locator(SELECTORS["signin"])
+                scope = container if await container.count() == 1 else frame
+                error = error or await scope.get_by_role("alert").filter(visible=True).count() > 0
+            except Exception:
+                error = True
+        if error:
+            return {
+                "status": "UNKNOWN",
+                "component": "ERROR",
+                "reason": "Apple 登录组件提示异常，请人工检查",
+            }
+        if ready:
+            return {
+                "status": "REQUIRED",
+                "component": "READY",
+                "reason": "登录表单已就绪，请在官网完成登录",
+            }
+        return {
+            "status": "UNKNOWN",
+            "component": "LOADING",
+            "reason": "Apple 登录组件尚未就绪，请等待或人工检查网络",
+        }
+
+    async def login_status_detail(self) -> dict:
+        page = self.manager.current_page(self.platform)
+        if page is not None and re.search(r"/shop/signin(?:/|$)", urlsplit(page.url).path, re.I):
+            async with self._lock:
+                return await self._login_component()
+        status = await self.login_status()
+        return {"status": status.value, "component": "NOT_ON_LOGIN", "reason": "已检查当前官网会话"}
+
+    async def try_login_from_env(self) -> dict:
+        # No trustworthy password/submit selector has been observed. Do not
+        # inspect environment secrets or partially type an account into a form
+        # whose complete ordinary login flow has not been validated.
+        return {
+            "status": "NOT_RUN",
+            "reason": "环境变量自动登录尚缺已验证密码和提交控件；请手动登录",
+        }
 
     async def verify_order(self) -> OrderReview:
         async with self._lock:
@@ -556,14 +683,13 @@ class AppleCNAdapter(InspectionAdapter):
         quantity = int(match[1])
         if quantity < 1:
             raise HumanRequired("订单数量无效")
+        self._require_plan(sku, quantity)
         line_total = money(await item.locator(SELECTORS["bag_price"]).inner_text())
         total = money(await self._locator("bag_total").inner_text())
         address_fingerprint = await self._address_fingerprint()
-        address_confirmed = bool(
-            address_fingerprint and address_fingerprint == self._confirmed_address
-        )
+        address_confirmed = self._address_approved(address_fingerprint)
         market_fingerprint = await self._market_fingerprint()
-        market_verified = bool(market_fingerprint and market_fingerprint == self._confirmed_market)
+        market_verified = self._market_approved(market_fingerprint)
         logos = self._locator("review_payment")
         payment = [await logo.get_attribute("alt") for logo in await logos.all()]
         financing = None
@@ -616,7 +742,11 @@ class AppleCNAdapter(InspectionAdapter):
         page = self.manager.current_page(self.platform)
         if page is not None:
             if re.search(r"/shop/signin(?:/|$)", urlsplit(page.url).path, re.I):
-                return Verification(required=True, reason="login")
+                component = (await self._login_component())["component"]
+                reason = {"READY": "login", "LOADING": "login_loading", "ERROR": "login_error"}[
+                    component
+                ]
+                return Verification(required=True, reason=reason)
         return await super()._detect_verification()
 
     async def submit_order(self) -> OrderResult:

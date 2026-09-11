@@ -74,6 +74,12 @@ class LoginStatus(StrEnum):
     UNKNOWN = "UNKNOWN"
 
 
+class CartState(StrEnum):
+    NOT_ATTEMPTED = "NOT_ATTEMPTED"
+    ATTEMPTED_UNKNOWN = "ATTEMPTED_UNKNOWN"
+    CART_VERIFIED = "CART_VERIFIED"
+
+
 class SKU(Model):
     id: str = Field(min_length=1)
     platform: Platform

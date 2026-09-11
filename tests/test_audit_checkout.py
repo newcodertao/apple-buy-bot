@@ -4,11 +4,11 @@ from unittest.mock import AsyncMock
 
 import pytest
 from fastapi.testclient import TestClient
+from test_audit_protected_run import configuration
 from test_marketplace_contracts import purchase
 
-from src.core.config import OrderSettings, load_config, validate_platform_url
+from src.core.config import OrderSettings, validate_platform_url
 from src.core.models import Platform
-from src.main import initialize
 from src.order.checkout import OrderVerificationError, verify_checkout
 from src.web.app import create_app
 
@@ -54,9 +54,7 @@ def test_apple_foreign_storefront_cannot_be_a_mainland_product_target():
 
 
 def test_local_confirmation_requires_explicit_flag_and_cannot_enable_submission(tmp_path):
-    path = tmp_path / "config/config.yaml"
-    initialize(path)
-    app = create_app(load_config(path))
+    app = create_app(configuration(tmp_path))
     with TestClient(app, base_url="http://127.0.0.1") as client:
         runtime = app.state.runtime
         reader = AsyncMock(
@@ -65,6 +63,15 @@ def test_local_confirmation_requires_explicit_flag_and_cannot_enable_submission(
         runtime.adapters[Platform.APPLE].confirm_address = reader
         before = (runtime.config.app, runtime.config.order, runtime.database.guard_status())
         headers = {"X-Apple-Bot-Control": "local"}
+        plan = client.get("/purchase-plan").json()
+        assert (
+            client.post(
+                "/approve-plan",
+                headers=headers,
+                json={"digest": plan["digest"], "confirmed": True},
+            ).status_code
+            == 200
+        )
         assert client.post("/confirm-address", json={"confirmed": True}).status_code == 403
         for body in ({}, {"confirmed": False}, {"confirmed": True, "auto_submit": True}):
             assert client.post("/confirm-address", headers=headers, json=body).status_code == 422

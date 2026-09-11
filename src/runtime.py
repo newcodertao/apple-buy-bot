@@ -12,7 +12,8 @@ from src.core.config import AppConfig, ProductTarget, validate_platform_url
 from src.core.engine import Engine, finish_cleanup
 from src.core.exceptions import ConfigurationError
 from src.core.logging import setup_logging
-from src.core.models import OrderReview, Platform
+from src.core.models import CartState, OrderReview, Platform
+from src.order.plan import draft_plan, load_plan, save_plan
 from src.platforms.apple_cn.adapter import AppleCNAdapter
 from src.platforms.apple_cn.selectors import LOGIN_URL
 from src.platforms.jd.adapter import JDAdapter
@@ -34,19 +35,21 @@ class Runtime:
     def __init__(self, config: AppConfig):
         self.config = config
         setup_logging(config.paths.logs)
+        self._plan_path = config.paths.root / "data" / "purchase-plan.json"
+        self.purchase_plan = load_plan(self._plan_path, draft_plan(config))
         self.database = Database(config.paths.database)
         self.database.initialize()
         self.manager = BrowserManager(config.paths.profiles, headless=config.app.headless)
         self.adapters = self._build_adapters()
-        self._owned_adapters = self.adapters
+        self._bind_plan()
         self.engine = Engine(config, self.adapters, self.database)
         self.task: asyncio.Task | None = None
         self._control = asyncio.Lock()
         self._session_status = {}
         self._closed = False
 
-    def _build_adapters(self):
-        config = self.config
+    def _build_adapters(self, config=None):
+        config = config or self.config
         preferences = {key: config.preferences_for(key) for key in config.products}
         adapters = {
             Platform.APPLE: AppleCNAdapter(
@@ -85,6 +88,44 @@ class Runtime:
             raise ConfigurationError(
                 f"{hold['active_channel']} 正保留结算或订单页面：{hold['reason']}；请先核对结果"
             )
+        adapter = self.adapters.get(platform)
+        if (
+            getattr(adapter, "_cart_attempted", False)
+            or getattr(adapter, "_submit_attempted", False)
+            or getattr(adapter, "cart_state", CartState.NOT_ATTEMPTED) != CartState.NOT_ATTEMPTED
+        ):
+            raise ConfigurationError("已有加购或提交尝试；保留原页面核对，不能重建购买流程")
+
+    def _bind_plan(self) -> None:
+        adapter = self.adapters.get(Platform.APPLE)
+        if isinstance(adapter, AppleCNAdapter):
+            adapter.purchase_plan = self.purchase_plan
+
+    def plan_snapshot(self) -> dict:
+        plan = self.purchase_plan
+        return {
+            **plan.terms(),
+            "digest": plan.digest,
+            "approved": plan.approved_at is not None,
+            "approved_at": plan.approved_at.isoformat() if plan.approved_at else None,
+            "address_confirmed": bool(plan.address_fingerprint),
+            "confirmed_product_count": len(plan.market_fingerprints),
+        }
+
+    async def approve_plan(self, digest: str) -> dict:
+        """The local UI/CLI must present the exact terms before approving this revision."""
+        async with self._control:
+            if digest != self.purchase_plan.digest or not self.purchase_plan.products:
+                raise ConfigurationError("购买计划已变化或没有 Apple 商品，请重新查看后确认")
+            if self.task and not self.task.done():
+                state = self.engine.snapshot()["platforms"].get("apple", {}).get("state")
+                if state != "WAITING_HUMAN":
+                    raise ConfigurationError("请等待任务暂停后确认购买计划")
+            updated = self.purchase_plan.approved()
+            save_plan(self._plan_path, updated)
+            self.purchase_plan = updated
+            self._bind_plan()
+            return {"status": "本次购买计划已保存；提交开关保持原值", "plan": self.plan_snapshot()}
 
     async def open_login(self, platform: Platform = Platform.APPLE) -> dict:
         async with self._control:
@@ -99,7 +140,17 @@ class Runtime:
 
     async def check_login(self, platform: Platform = Platform.APPLE) -> dict:
         async with self._control:
-            self._require_session_idle(platform)
+            hold = self.engine.session_hold(platform)
+            if hold and hold["active_channel"] != platform.value:
+                raise ConfigurationError("请选择当前占用会话的平台检查登录")
+            # Read the existing page during a human pause; never navigate away
+            # from a paused checkout or an existing receipt to check authentication.
+            if self.task and not self.task.done():
+                state = self.engine.snapshot()["platforms"].get(platform.value, {}).get("state")
+                if state != "WAITING_HUMAN":
+                    raise ConfigurationError("任务运行中，请等待暂停后检查当前页面登录状态")
+            elif self.manager.current_page(platform) is None:
+                self._require_session_idle(platform)
             adapter = self.adapters[platform]
             if self.manager.current_page(platform) is None:
                 targets = self.config.targets([platform])
@@ -111,7 +162,15 @@ class Runtime:
                     await adapter._navigate(page, LOGIN_URLS[platform])
             login = await adapter.login_status()
             self._session_status[platform.value] = login.value
-            return {"platform": platform.value, "login": login.value, "status": login.value}
+            details = getattr(adapter, "login_status_detail", None)
+            return {
+                **(await details() if details else {}),
+                "platform": platform.value,
+                "login": login.value,
+                "status": login.value,
+                "state_import": self.manager.login_state_import_status(platform),
+                "network": self.manager.network_diagnostics(platform),
+            }
 
     async def check_product(self, platform: Platform, product_id: str) -> dict:
         async with self._control:
@@ -151,13 +210,21 @@ class Runtime:
                 raise ConfigurationError("当前配置没有文件来源，无法保存")
             updated._root = self.config._root
             updated._source_path = path
+            next_plan = draft_plan(updated)
+            if next_plan.digest == self.purchase_plan.digest:
+                next_plan = self.purchase_plan
+            # Prepare every fallible in-memory replacement before publishing the
+            # file: a build failure must never pair a new target with old approval.
+            next_adapter = self._build_adapters(updated)[platform]
             temporary = path.with_suffix(path.suffix + ".tmp")
             temporary.write_text(
                 yaml.safe_dump(values, allow_unicode=True, sort_keys=False), encoding="utf-8"
             )
             os.replace(temporary, path)
             self.config = updated
-            self.adapters[platform] = self._build_adapters()[platform]
+            self.purchase_plan = next_plan
+            self.adapters[platform] = next_adapter
+            self._bind_plan()
             self.engine.config = updated
             return {"status": "商品配置已保存"}
 
@@ -222,7 +289,27 @@ class Runtime:
                 state = self.engine.snapshot()["platforms"].get(platform.value, {}).get("state")
                 if state != "WAITING_HUMAN":
                     raise ConfigurationError("请等待流程暂停后，在当前页面核对并确认")
+            if (
+                platform == Platform.APPLE
+                and isinstance(self.adapters[platform], AppleCNAdapter)
+                and self.purchase_plan.approved_at is None
+            ):
+                raise ConfigurationError("请先查看并批准本次购买计划")
             result = await getattr(self.adapters[platform], "confirm_" + kind)()
+            if platform == Platform.APPLE and self.purchase_plan.approved_at is not None:
+                if kind == "address":
+                    changes = {"address_fingerprint": result["address_fingerprint"]}
+                else:
+                    fingerprint = result["market_evidence"].removeprefix("MANUAL_CN:")
+                    changes = {
+                        "market_fingerprints": sorted(
+                            set(self.purchase_plan.market_fingerprints) | {fingerprint}
+                        )
+                    }
+                updated = self.purchase_plan.model_copy(update=changes)
+                save_plan(self._plan_path, updated)
+                self.purchase_plan = updated
+                self._bind_plan()
             return {"status": "本次确认已绑定当前页面；页面变化后须重新确认", **result}
 
     async def start(self, platforms=None, immediate=False, dry_run=None) -> dict:
@@ -241,10 +328,8 @@ class Runtime:
                 # Retrieve any exception before replacing task, avoiding silent background failures.
                 with contextlib.suppress(asyncio.CancelledError, Exception):
                     self.task.result()
-            # Keep caller-supplied adapters (including offline integration adapters).
-            if self.adapters is self._owned_adapters:
-                self.adapters = self._build_adapters()
-                self._owned_adapters = self.adapters
+            # A new Engine must not reset live adapter attempt flags or approvals.
+            self._bind_plan()
             self.engine = Engine(self.config, self.adapters, self.database)
             self.task = asyncio.create_task(
                 self.engine.run(platforms=platforms, immediate=immediate, dry_run=dry_run)
@@ -293,6 +378,18 @@ class Runtime:
             for platform, adapter in self.adapters.items()
         }
         result["order_guard"] = self.database.guard_status()
+        result["purchase_plan"] = self.plan_snapshot()
+        result["cart_states"] = {
+            platform.value: str(getattr(adapter, "cart_state", CartState.NOT_ATTEMPTED))
+            for platform, adapter in self.adapters.items()
+        }
+        result["login_diagnostics"] = {
+            platform.value: {
+                "state_import": self.manager.login_state_import_status(platform),
+                "network": self.manager.network_diagnostics(platform),
+            }
+            for platform in self.adapters
+        }
         if self.task and self.task.done() and not self.task.cancelled():
             error = self.task.exception()
             if error:

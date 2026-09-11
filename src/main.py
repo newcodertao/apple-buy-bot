@@ -2,6 +2,7 @@ import argparse
 import asyncio
 import contextlib
 import json
+import logging
 import shutil
 import sys
 import threading
@@ -103,15 +104,18 @@ def console_queue() -> asyncio.Queue:
 
 
 async def run_console(runtime, platforms, immediate, dry_run):
+    output({"purchase_plan": runtime.plan_snapshot()})
     await runtime.start(platforms, immediate=immediate, dry_run=dry_run)
     print(
-        "控制命令：resume [platform] / confirm-address platform / "
+        "控制命令：plan / approve-plan <digest> / resume [platform] / confirm-address platform / "
         "confirm-market platform / stop / status。"
-        "请先在浏览器核对地址和国行版本，再输入对应确认命令。"
+        "请先用 plan 查看购买条件，再用 approve-plan 和展示的 digest 确认该版本。"
+        "请在浏览器核对地址和国行版本，再输入对应确认命令。"
     )
     queue = console_queue()
     reader = asyncio.create_task(queue.get())
     stop_requested = False
+    worker_failed = False
     try:
         while runtime.task and not runtime.task.done():
             done, _ = await asyncio.wait(
@@ -130,6 +134,14 @@ async def run_console(runtime, platforms, immediate, dry_run):
                         await runtime.stop()
                     elif parts[0] == "status":
                         output(runtime.snapshot())
+                    elif parts[0] == "plan":
+                        output(runtime.plan_snapshot())
+                    elif parts[0] == "approve-plan" and len(parts) == 2:
+                        if runtime.task.done():
+                            raise ConfigurationError(
+                                "当前工作已结束；请先核对结果，不能继续批准购买"
+                            )
+                        output(await runtime.approve_plan(parts[1]))
                     elif parts[0] in {"confirm-address", "confirm-market"} and len(parts) == 2:
                         output(
                             await runtime.confirm_checkout(
@@ -138,22 +150,35 @@ async def run_console(runtime, platforms, immediate, dry_run):
                         )
                     else:
                         print(
-                            "可用命令：resume [platform] / confirm-address platform / "
+                            "可用命令：plan / approve-plan <digest> / resume [platform] / "
+                            "confirm-address platform / "
                             "confirm-market platform / stop / status"
                         )
                 except (ValueError, BotError) as exc:
                     print(redact(str(exc)))
         if runtime.task:
-            with contextlib.suppress(asyncio.CancelledError):
+            try:
                 await runtime.task
-        output(runtime.snapshot())
+            except asyncio.CancelledError:
+                pass
+            except Exception as exc:
+                worker_failed = True
+                # Error text may contain page content or credentials; retain only its type.
+                with contextlib.suppress(Exception):
+                    logging.getLogger(__name__).error("Run task failed: %s", type(exc).__name__)
+                print(f"运行异常：{type(exc).__name__}；页面已保留，请核对后输入 stop。")
+        with contextlib.suppress(Exception):
+            output(runtime.snapshot())
         # Ambiguous submission / unclassified errors may finish the worker, but the
         # browser is still the user's evidence. Only stop or browser close ends this hold.
         while (
             not stop_requested
-            and any(
-                p["state"] in {"WAITING_HUMAN", "READY_TO_SUBMIT", "SUCCESS"}
-                for p in runtime.snapshot().get("platforms", {}).values()
+            and (
+                worker_failed
+                or any(
+                    p["state"] in {"WAITING_HUMAN", "READY_TO_SUBMIT", "SUCCESS"}
+                    for p in runtime.snapshot().get("platforms", {}).values()
+                )
             )
             and any(runtime.manager.current_page(p) is not None for p in Platform)
         ):
@@ -166,8 +191,11 @@ async def run_console(runtime, platforms, immediate, dry_run):
                 break
             if command == "status":
                 output(runtime.snapshot())
-            elif command.startswith("resume"):
+            elif command == "plan":
+                output(runtime.plan_snapshot())
+            elif command.startswith(("resume", "approve-plan")):
                 print("当前工作已暂停结束；请先核对订单结果。resume 不会解除订单锁或重新提交。")
+        return 2 if worker_failed else 0
     finally:
         reader.cancel()
         with contextlib.suppress(asyncio.CancelledError):
@@ -319,7 +347,7 @@ async def async_main(args) -> int:
                 if args.command == "run" or args.platform == "all"
                 else [Platform(args.platform)]
             )
-            await run_console(
+            return await run_console(
                 runtime,
                 platforms,
                 immediate=args.command == "dry-run" or args.now,
