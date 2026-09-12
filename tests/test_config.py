@@ -18,6 +18,10 @@ from src.core.models import Platform
 def test_example_is_safe_and_targets_unknown():
     config = load_config(Path(__file__).parents[1] / "config/config.example.yaml")
     assert config.app.dry_run and not config.order.auto_submit
+    assert config.app.browser == "chrome"
+    assert AppConfig.model_validate({"app": {"browser": "msedge"}}).app.browser == "msedge"
+    with pytest.raises(ValidationError):
+        AppConfig.model_validate({"app": {"browser": "unverified-browser"}})
     assert config.order.single_order_lock
     assert config.targets() == []
     assert config.sale.target() is None

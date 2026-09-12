@@ -21,7 +21,7 @@ button:disabled{opacity:.55;cursor:wait}input,select{background:#0f172a;color:#f
 <section class="card"><small>运行方式</small><div id="mode" class="value">读取中</div><small id="guard">订单保护状态未知</small></section></div>
 <div class="bar"><h2>平台进度</h2><label>操作平台<select id="platform-choice"><option value="apple">Apple 中国</option><option value="jd">京东</option><option value="tmall">天猫</option><option value="taobao">淘宝</option></select></label></div>
 <div class="actions"><button data-action="login">打开登录</button><button data-action="check-login">检查登录</button><button class="primary" data-action="start">开始此平台</button><button data-action="start" data-immediate="true">立即演练此平台</button><button data-action="resume">人工处理后继续</button><button data-action="check-checkout">检查当前结算</button><button data-action="read-order">读取当前订单</button><button data-action="finish-task">结束本机任务</button><button class="danger" data-action="stop">停止自动动作</button><button id="refresh">暂停页面刷新</button></div>
-<p class="status-note">淘宝与天猫共用登录状态，串行操作。第一次在程序打开的正式版 Chrome 登录，后续复用。</p>
+<p id="browser-note" class="status-note">第一次在程序打开的浏览器登录，后续复用该浏览器的程序专用资料。</p>
 <p id="payment" class="sub">付款偏好读取中</p>
 <p id="capability" class="status-note"></p>
 <p id="message" role="status" aria-live="polite"></p>
@@ -48,6 +48,7 @@ async function loadProducts(){const r=await fetch('/products');products=await r.
 async function refresh(){if(paused||document.hidden)return;try{
 const [r,e,o]=await Promise.all([fetch('/status'),fetch('/events?limit=8'),fetch('/orders?limit=5')]);if(!r.ok||!e.ok||!o.ok)throw Error('状态服务不可用');
 const data=await r.json(),events=await e.json(),orders=await o.json(),clock=data.clock||{};
+el('browser-note').textContent='当前浏览器：'+(data.browser==='msedge'?'Microsoft Edge':'Google Chrome')+'。首次手动登录，后续复用程序专用资料；切换浏览器不会清除订单保护。';
 currentPlan=data.purchase_plan||null;
 el('changed-content').hidden=!Object.values(data.platforms||{}).some(p=>p.state==='WAITING_HUMAN');
 el('purchase-plan').textContent=currentPlan?planText(currentPlan):'计划不可用';

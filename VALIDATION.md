@@ -1,5 +1,34 @@
 # Apple 实页适配验收
 
+## 2026-09-12 追加：按用户选择切换 Edge
+
+本轮基线 `6f3702a0bb570ccdb19eedd9da494785fb422788`，开工工作区干净。本机原配置仅增加 `app.browser: msedge`；`dry_run=true`、`auto_submit=false` 和原 SUCCESS 订单锁保留。
+
+- `src/core/config.py`、`config/config.example.yaml`：浏览器仅可选 `chrome` / `msedge`；示例默认 Chrome，本机配置选择 Edge。无新增凭据或购买接口。
+- `src/browser/manager.py`：沿用 persistent context，Edge 实际资料目录为 `data/profiles/msedge/apple`，原 Chrome 资料不搬移、不复制、不删除。不同浏览器仍争用原 `data/profiles/apple` 中的 ProfileLock，不能并发操作同一平台；订单记录和 guard 仍在同一数据库。状态导入标记跟随各自资料目录，不能把 Chrome 的旧导入当作 Edge 已登录。
+- `src/runtime.py`、`src/diagnostics.py`、`src/web/index.html`：普通 Runtime 传入所选渠道，doctor 检查所选浏览器，网页显示实际浏览器。批准计划、候选、提交保护均沿用，无更换 Adapter 的额外入口。
+- `tests/test_browser.py`、`tests/test_config.py`：参数化既有测试，验证 Edge 本地 Cookie/localStorage 关闭重开仍存在、Chrome 原目录保留、Chrome↔Edge 共享平台锁、缺失浏览器不回退，以及拒绝未知配置。
+
+真实入口：使用普通 `python -u -m src.main web --port 8766` 启动新服务，再经 `/login` → `Runtime.open_login` → `BrowserManager.open_visible` → Apple 正常账户入口。实际进程为 `C:\Program Files (x86)\Microsoft\Edge\Application\msedge.exe`，版本 `153.0.4234.32`，沙盒启用。用户先关闭原程序 Chrome；没有关闭或修改日常 Chrome。
+
+**真实结果 BLOCKED**：本次 Apple 登录主文档返回 HTTP **503**，`/login` 返回409（平台暂不可用），随后 `/check-login` 为 UNKNOWN / NOT_ON_LOGIN。请求错误分类仅包含已知主机、主文档、状态503，不保存查询参数或页面私密正文。没有到登录成功、购物袋或结算；没有加购、提交订单、付款、取消订单或清锁。不能把此503推广成所有浏览器都无法登录，也不能据此认定之前转圈的根因。
+
+定向检查 **8 passed，18.42秒**，证据 `outputs/edge-targeted.xml`；只访问 localhost 和临时资料目录，不包含真实账户。最终完整 pytest **PASS：275 passed，0 failed、0 skipped，3 warnings，140.02秒**，退出0，证据 `outputs/edge-full.txt/.xml`。Ruff、compileall、网页脚本语法及 `git diff --check` 均通过；之后仅更新文档。原 guard 全字段 SHA256 仍为 `3c00c641d5215b0e570ab8aad8f424ae3c6d135d190aeb4f8b0ed710dc55af08`。实际检查命令：
+
+```powershell
+git status --short
+git rev-parse HEAD
+.\.venv\Scripts\python.exe -u -m src.main web --port 8766
+.\.venv\Scripts\python.exe -m pytest -q --tb=short --junitxml=outputs/edge-full.xml
+.\.venv\Scripts\python.exe -m ruff check src tests
+.\.venv\Scripts\python.exe -m compileall -q src tests
+node --check outputs/edge-web.js
+```
+
+下方为本日先前修复及真实 Chrome 观察，不能当作本次 Edge 登录成功证据。
+
+---
+
 ## 2026-09-12 本轮：一次开始确认、候选继续和正常结束任务
 
 本机开工 HEAD：`222d6bbaf0fc6b58e14d19efdbe7f8bba56dcecc`。工作区已有六个未提交文件（engine、main、Apple adapter、runtime、test_audit_apple、test_session_control），先记录并接续，未重置或覆盖。基线证据为本机 `outputs/sep12-baseline.json`。完成后的提交号和远端核对见交付回复。

@@ -1,6 +1,10 @@
 # apple-buy-bot
 
-本轮只推进 Apple 中国大陆官网的本机购买流程，沿用正式版 Chrome 和程序专用登录会话，不扩展平台或框架。开始前一次确认购买条件，随后按优先级选择首个合格 SKU、核验购物袋和结算；登录或实际内容变化时保留页面供人工处理。**程序独立 profile 尚未完成“登录 → 开始 → 选择 → 加购一次 → 真实结算页”验收。** 2026-09-12 已在普通 Chrome 查看新品 Continue，但按钮仍禁用，启用后的流程未执行；程序登录页转圈仍在定位。既有 SUCCESS 订单锁保留，不清锁通过验收。详细结果见 [验收记录](VALIDATION.md)。
+本轮只推进 Apple 中国大陆官网的本机购买流程，使用正式版 Chrome/Edge 和程序专用登录会话，不扩展平台或框架。开始前一次确认购买条件，随后按优先级选择首个合格 SKU、核验购物袋和结算；登录或实际内容变化时保留页面供人工处理。**程序独立 profile 尚未完成“登录 → 开始 → 选择 → 加购一次 → 真实结算页”验收。** 2026-09-12 已在普通 Chrome 查看新品 Continue，但按钮仍禁用，启用后的流程未执行；程序登录页转圈仍在定位。既有 SUCCESS 订单锁保留，不清锁通过验收。详细结果见 [验收记录](VALIDATION.md)。
+
+2026-09-12 按用户选择增加现有正式版 Edge：本机配置现为 `app.browser: msedge`，通用示例仍默认 `chrome`。CLI/Web/doctor 都使用所选浏览器，网页显示当前选择。只支持这两个已安装渠道，启动失败不自动换浏览器。Edge 资料在 `data/profiles/msedge/<平台>`，Chrome 原目录不变；两者共享同一任务锁、数据库和购买计划，切换不会解除已有订单保护。先关闭原程序浏览器再切换配置并重启服务，日常浏览器无需关闭。
+
+Edge 的本地登录状态持久化检查通过；真实 Apple 登录入口本轮首次返回 HTTP 503，尚未认证。切换浏览器不代表已解决官网转圈或已通过真实结算。
 
 所有最终支付由用户手动完成。没有验证码识别、滑块破解、短信/人脸/设备验证绕过、隐身插件、代理轮换、批量账号或私有下单接口。
 
@@ -14,7 +18,7 @@ Set-Location 'D:\Apple\apple-buy-bot'
 & .\.venv\Scripts\python.exe -m src.main web
 ```
 
-打开 <http://127.0.0.1:8765>，选择 Apple 后点击“打开登录”，在程序 Chrome 手动登录，再点击“检查登录”。保存商品配置并查看“本次购买条件”，点击“开始此平台”或“立即演练此平台”时，一次确认商品、备选规格、数量、预算、收货依据和付款方式。相同条件沿用本机确认，不再分别要求批准计划、确认商品和确认地址。默认 `dry_run: true`、`auto_submit: false`；确认不会改变这些开关，网页/API 无法关闭演练保护或开启自动提交。
+打开 <http://127.0.0.1:8765>，选择 Apple 后点击“打开登录”，在程序浏览器手动登录，再点击“检查登录”。保存商品配置并查看“本次购买条件”，点击“开始此平台”或“立即演练此平台”时，一次确认商品、备选规格、数量、预算、收货依据和付款方式。相同条件沿用本机确认，不再分别要求批准计划、确认商品和确认地址。默认 `dry_run: true`、`auto_submit: false`；确认不会改变这些开关，网页/API 无法关闭演练保护或开启自动提交。
 
 需要使用其他端口时运行 `python -m src.main web --port 8766`，按启动输出访问对应地址；不要在同一端口重复启动。
 
@@ -30,7 +34,7 @@ python -m venv .venv
 & .\.venv\Scripts\python.exe -m ruff check .
 ```
 
-要求 Python 3.12+ 和已安装的正式版 Google Chrome；程序使用 Playwright 的 chrome 通道，CLI、网页登录和购买流程统一使用正式版，不回退到 Chrome for Testing。程序使用专用 profile，不读取或继承日常 Chrome 的默认资料目录；日常 Chrome 已登录不代表程序已登录。首次在程序中登录后保存，过期或验证时人工处理。
+要求 Python 3.12+ 和已安装的正式版 Google Chrome 或 Microsoft Edge；程序按 app.browser 使用 Playwright 的 chrome 或 msedge 通道，CLI、网页登录和购买流程统一使用正式版，不回退到 Chrome for Testing。程序使用专用 profile，不读取或继承日常 Chrome 的默认资料目录；日常 Chrome 已登录不代表程序已登录。首次在程序中登录后保存，过期或验证时人工处理。
 
 本机使用 Python 3.14.5、Playwright 1.62.0。`requirements.lock.txt` 保存已记录的直接/间接依赖版本，可先安装它，再执行 `pip install -e . --no-deps` 复现。Python 3.12 本身未单独运行兼容性测试。
 
@@ -40,7 +44,7 @@ python -m venv .venv
 |---|---|---|
 | 全量 pytest / Ruff / compileall | 见本轮 VALIDATION | 以本轮最终执行记录为准；本地测试不代表实站交易通过 |
 | 一次开始前确认、暂停恢复、结束任务 | 已接入 CLI/Web | 确认未变化时复用；finish 保留页面、订单记录和交易保护；本地回归及 UI 点击结果见 VALIDATION |
-| Chrome 持久会话 | 已实现；真实登录仍待核实 | 手动登录程序 profile 一次，后续复用；每次运行仍检查真实登录状态，普通 Chrome 登录不等同程序登录 |
+| Chrome/Edge 持久会话 | 已实现；真实登录仍待核实 | 手动登录程序 profile 一次，后续复用；每次运行仍检查真实登录状态，普通 Chrome 登录不等同程序登录 |
 | Apple 受保护演练 | 本地合成页面与实站分开记录 | 正常 Runtime 流程的本地测试不能证明程序 profile 已到真实结算页 |
 | 本机原 SUCCESS 订单锁 | 保留 | 既有保护优先于新的开始确认，不删除数据库、不清锁运行新测试单 |
 | 首个合格 SKU、购物袋恢复 | 已实现 | 按配置优先级找到合格组合即继续；仅加购前明确失效可回退，未知加购或提交不重放 |
@@ -111,7 +115,7 @@ python -m src.main --headless inspect apple https://www.apple.com.cn/shop/buy-ip
 
 `--config PATH` 与 `--headless` 是全局参数，放在子命令前。自定义配置按 `项目根/config/文件.yaml` 放置，运行目录始终锚定配置父目录的上一级，不随 shell 当前目录变化。`init` 不覆盖已有配置。
 
-`login` 由你在显示出的正式版 Chrome 中完成；按 Enter 或关闭窗口后保存 profile。也可在网页选择平台并打开登录。程序不收集密码/验证码、不导出 Cookie；`check-login` 通过各网站已经观察到的账户控件核实认证，打开页面或存在 profile 本身不代表登录成功。Apple 登录诊断区分表单已就绪、组件仍在加载和组件异常；只读这些状态，不读取输入值或私密错误正文。首次登录后可沿用会话，过期或安全验证时再人工处理。
+`login` 由你在显示出的所选浏览器中完成；按 Enter 或关闭窗口后保存 profile。也可在网页选择平台并打开登录。程序不收集密码/验证码、不导出 Cookie；`check-login` 通过各网站已经观察到的账户控件核实认证，打开页面或存在 profile 本身不代表登录成功。Apple 登录诊断区分表单已就绪、组件仍在加载和组件异常；只读这些状态，不读取输入值或私密错误正文。首次登录后可沿用会话，过期或安全验证时再人工处理。
 
 已有本机 Apple 登录状态文件时，可在启动程序前设置可选环境变量 `APPLE_BUY_BOT_STORAGE_STATE_FILE`，指向本机 UTF-8 JSON 文件。支持标准 Playwright `cookies` / `origins`（其中含 `localStorage`）格式，也支持标准 Cookie 数组；仅接收允许的 Apple 来源。导入只补充专用 profile 中缺失的 Cookie 和 localStorage 项，不清空或覆盖已有项。导入成功不等于登录成功，每次运行仍检查真实账户状态。IndexedDB、通行密钥和裸 Token 不支持；状态文件含敏感登录信息，只留本机，不放入配置或仓库，也不要粘贴到对话。
 
@@ -127,7 +131,7 @@ python -m src.main --headless inspect apple https://www.apple.com.cn/shop/buy-ip
 
 仅当页面提示内容变化或依据缺失时，核对后使用 `confirm-address apple`、`confirm-market apple`，再 `resume apple`；网页将兼容入口收在默认关闭的“实际内容变化后的处理”中。没有变化的正常登录或验证码处理直接继续。地址只保存摘要，不保存正文。每次实际读取商品仍需符合已批准的 Apple CN 官方直售配置；该批准依据不声称已经读取独立的硬件版本标识，也不把商城配送地区或卖家 ID 当作国行证明。
 
-`status` 读取 SQLite 历史记录，实时运行状态使用 Web `/status`。`doctor` 用临时无窗口会话验证正式版 Chrome 能否启动并报告版本，不使用账号 profile、不执行真实登录或购买；默认网络是 NOT RUN，`--online` 额外执行一次公开 HEAD 请求。时钟诊断显示本地时间、UTC、目标时间、时区偏移；外部时钟误差未测量，不会声称完成时间同步。
+`status` 读取 SQLite 历史记录，实时运行状态使用 Web `/status`。`doctor` 用临时无窗口会话验证所选浏览器能否启动并报告版本，不使用账号 profile、不执行真实登录或购买；默认网络是 NOT RUN，`--online` 额外执行一次公开 HEAD 请求。时钟诊断显示本地时间、UTC、目标时间、时区偏移；外部时钟误差未测量，不会声称完成时间同步。
 
 ## SKU 与提交保护
 
@@ -184,7 +188,7 @@ GET：`/status`、`/platforms`、`/products`、`/purchase-plan`、`/events?limit
 
 ## 下一阶段
 
-当前目标仅为 Apple：程序 Chrome 手动登录一次并复用会话，从正常 CLI/Web 入口到真实结算页。优先补齐新品 Continue 启用后的真实路径；未看到的结构不填猜测选择器。开发演练不提交，正式提交需用户本机显式配置，最终付款手动完成。
+当前目标仅为 Apple：程序浏览器手动登录一次并复用会话，从正常 CLI/Web 入口到真实结算页。优先补齐新品 Continue 启用后的真实路径；未看到的结构不填猜测选择器。开发演练不提交，正式提交需用户本机显式配置，最终付款手动完成。
 
 淘宝、天猫、京东的原接入设计保留在 [多平台接入设计](docs/marketplace-integration-design.md)，本轮不扩展其能力。已创建的待付款单和不明结果都计入订单保护，不自动重试或清锁。数据库升级前自动生成含 WAL 数据的本地备份，迁移保留旧订单锁。
 

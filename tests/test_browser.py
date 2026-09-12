@@ -24,17 +24,20 @@ from src.platforms.tmall.adapter import TmallAdapter
 pytestmark = pytest.mark.browser
 
 
-async def test_missing_stable_chrome_releases_profile_without_fallback(tmp_path):
-    manager = BrowserManager(tmp_path / "profiles", headless=True)
+@pytest.mark.parametrize(
+    "channel,label", [("chrome", "Google Chrome"), ("msedge", "Microsoft Edge")]
+)
+async def test_missing_stable_browser_releases_profile_without_fallback(tmp_path, channel, label):
+    manager = BrowserManager(tmp_path / "profiles", headless=True, channel=channel)
     launch = AsyncMock(side_effect=Error("test-only missing browser"))
     manager._playwright = SimpleNamespace(
         chromium=SimpleNamespace(launch_persistent_context=launch), stop=AsyncMock()
     )
     try:
-        with pytest.raises(HumanRequired, match="正式版 Google Chrome 无法打开"):
+        with pytest.raises(HumanRequired, match=label):
             await manager.open(Platform.APPLE)
         assert launch.await_count == 1
-        assert launch.await_args.kwargs["channel"] == "chrome"
+        assert launch.await_args.kwargs["channel"] == channel
         assert manager.current_page(Platform.APPLE) is None
         lock = ProfileLock(tmp_path / "profiles" / "apple")
         lock.acquire()
@@ -93,10 +96,16 @@ def local_site():
 
 
 @pytest.mark.asyncio
+@pytest.mark.parametrize("channel", ["chrome", "msedge"])
 async def test_persistent_profile_survives_close_reopen_and_platforms_are_isolated(
-    tmp_path, local_site
+    tmp_path, local_site, channel
 ):
-    manager = BrowserManager(tmp_path / "profiles", headless=True)
+    profiles = tmp_path / "profiles"
+    chrome_profile = profiles / "apple"
+    chrome_profile.mkdir(parents=True)
+    sentinel = chrome_profile / "existing-profile-marker"
+    sentinel.write_text("keep-existing-chrome-profile", encoding="utf-8")
+    manager = BrowserManager(profiles, headless=True, channel=channel)
     try:
         page, same_page = await asyncio.gather(
             manager.open(Platform.APPLE), manager.open(Platform.APPLE)
@@ -124,6 +133,11 @@ async def test_persistent_profile_survives_close_reopen_and_platforms_are_isolat
         assert await reopened.evaluate("localStorage.getItem('fixture-marker')") == "persisted"
         cookies = await reopened.context.cookies()
         assert any(cookie["name"] == "fixture-session" for cookie in cookies)
+        profile = profiles / "msedge" / "apple" if channel == "msedge" else chrome_profile
+        assert (profile / "Default").is_dir()
+        assert sentinel.read_text(encoding="utf-8") == "keep-existing-chrome-profile"
+        if channel == "msedge":
+            assert not (chrome_profile / "Default").exists()
         adapter = AppleCNAdapter(manager, tmp_path / "screenshots")
         assert await adapter.login_status() == LoginStatus.UNKNOWN
     finally:
@@ -131,9 +145,15 @@ async def test_persistent_profile_survives_close_reopen_and_platforms_are_isolat
 
 
 @pytest.mark.asyncio
-async def test_profile_lock_prevents_duplicate_process_and_releases_after_close(tmp_path):
-    first = BrowserManager(tmp_path / "profiles", headless=True)
-    second = BrowserManager(tmp_path / "profiles", headless=True)
+@pytest.mark.parametrize(
+    "first_channel,second_channel",
+    [("chrome", "chrome"), ("chrome", "msedge"), ("msedge", "chrome")],
+)
+async def test_profile_lock_prevents_duplicate_process_and_releases_after_close(
+    tmp_path, first_channel, second_channel
+):
+    first = BrowserManager(tmp_path / "profiles", headless=True, channel=first_channel)
+    second = BrowserManager(tmp_path / "profiles", headless=True, channel=second_channel)
     try:
         await first.open(Platform.APPLE)
         with pytest.raises(HumanRequired, match="already in use"):

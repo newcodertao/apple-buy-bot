@@ -3,6 +3,7 @@
 app:
   dry_run: true
   headless: false
+  browser: chrome  # chrome or msedge; installed stable browser, separate login profiles.
 sale:
   time: null  # Set confirmed local sale time, e.g. "2026-09-12 20:00:00"
   timezone: Asia/Shanghai

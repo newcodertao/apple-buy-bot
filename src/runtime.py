@@ -39,7 +39,9 @@ class Runtime:
         self.purchase_plan = load_plan(self._plan_path, draft_plan(config))
         self.database = Database(config.paths.database)
         self.database.initialize()
-        self.manager = BrowserManager(config.paths.profiles, headless=config.app.headless)
+        self.manager = BrowserManager(
+            config.paths.profiles, headless=config.app.headless, channel=config.app.browser
+        )
         self.adapters = self._build_adapters()
         self._bind_plan()
         self.engine = Engine(config, self.adapters, self.database)
@@ -430,6 +432,7 @@ class Runtime:
 
     def snapshot(self) -> dict:
         result = self.engine.snapshot()
+        result["browser"] = self.config.app.browser
         result["clock"] = diagnostics(self.config.sale.target(), self.config.sale.timezone)
         result["running"] = bool(self.task and not self.task.done())
         if not result["running"]:

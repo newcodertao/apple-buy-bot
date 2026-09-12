@@ -46,6 +46,7 @@ def validate_platform_url(platform: Platform, url: str) -> str:
 class AppSettings(Model):
     dry_run: bool = True
     headless: bool = False
+    browser: Literal["chrome", "msedge"] = "chrome"
 
 
 class SaleSettings(Model):

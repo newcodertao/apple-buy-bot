@@ -50,15 +50,22 @@ class BrowserSession:
 
 
 class BrowserManager:
-    """One persistent stable Chrome context per session group, guarded across processes."""
+    """Persistent stable browser sessions with shared cross-browser task locks."""
 
-    def __init__(self, profiles_dir: Path, headless: bool = False):
+    def __init__(self, profiles_dir: Path, headless: bool = False, *, channel=BROWSER_CHANNEL):
+        if channel not in {"chrome", "msedge"}:
+            raise ConfigurationError("Browser must be chrome or msedge")
         self.profiles_dir = Path(profiles_dir).resolve()
+        self.channel = channel
         self.headless = headless
         self._playwright: Playwright | None = None
         self._sessions: dict[Platform, BrowserSession] = {}
         self._lock = asyncio.Lock()
         self._import_status: dict[Platform, str] = {}
+
+    def profile_dir(self, platform: Platform) -> Path:
+        root = self.profiles_dir if self.channel == "chrome" else self.profiles_dir / "msedge"
+        return root / profile_platform(platform).value
 
     def login_state_import_status(self, platform: Platform) -> str:
         """Import is not proof that the website accepted this login state."""
@@ -197,10 +204,11 @@ class BrowserManager:
                 self._sessions.pop(platform)
             profile_lock = ProfileLock(self.profiles_dir / platform.value)
             profile_lock.acquire()
+            profile_dir = self.profile_dir(platform)
             context = None
             try:
                 local_state = None
-                marker = self.profiles_dir / platform.value / APPLE_STATE_MARKER
+                marker = profile_dir / APPLE_STATE_MARKER
                 if platform == Platform.APPLE:
                     if marker.exists():
                         self._import_status[platform] = "PREVIOUS_IMPORT_PROFILE_REUSED"
@@ -209,8 +217,8 @@ class BrowserManager:
                 if self._playwright is None:
                     self._playwright = await async_playwright().start()
                 context = await self._playwright.chromium.launch_persistent_context(
-                    user_data_dir=str(self.profiles_dir / platform.value),
-                    channel=BROWSER_CHANNEL,
+                    user_data_dir=str(profile_dir),
+                    channel=self.channel,
                     headless=headless,
                     chromium_sandbox=True,
                     accept_downloads=False,
@@ -258,8 +266,9 @@ class BrowserManager:
                 else:
                     profile_lock.release()
                 if isinstance(error, Error):
+                    name = "Google Chrome" if self.channel == "chrome" else "Microsoft Edge"
                     raise HumanRequired(
-                        "正式版 Google Chrome 无法打开；请检查安装、浏览器策略或程序 profile 占用"
+                        f"正式版 {name} 无法打开；请检查安装、浏览器策略或程序 profile 占用"
                     ) from None
                 raise
 

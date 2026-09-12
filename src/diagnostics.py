@@ -4,8 +4,8 @@ import sys
 import httpx
 from playwright.async_api import Error, async_playwright
 
-from src.browser.groups import profile_platform, session_key
-from src.browser.manager import BROWSER_CHANNEL
+from src.browser.groups import session_key
+from src.browser.manager import BrowserManager
 from src.core.clock import diagnostics
 from src.core.config import AppConfig
 from src.core.logging import safe_url
@@ -26,20 +26,22 @@ async def doctor(config: AppConfig, online: bool = False) -> dict:
         try:
             # A disposable headless launch checks the actual selected browser,
             # never the account profile or a bundled browser's unrelated path.
-            browser = await playwright.chromium.launch(channel=BROWSER_CHANNEL, headless=True)
+            browser = await playwright.chromium.launch(
+                channel=config.app.browser, headless=True, chromium_sandbox=True
+            )
             try:
-                checks["chrome"] = {
+                checks[config.app.browser] = {
                     "status": "PASS",
-                    "channel": BROWSER_CHANNEL,
+                    "channel": config.app.browser,
                     "version": browser.version,
                 }
             finally:
                 await browser.close()
         except Error:
-            checks["chrome"] = {
+            checks[config.app.browser] = {
                 "status": "FAIL",
-                "channel": BROWSER_CHANNEL,
-                "reason": "正式版 Google Chrome 无法启动，请检查安装和浏览器策略",
+                "channel": config.app.browser,
+                "reason": "所选浏览器无法启动，请检查安装和浏览器策略",
             }
     database = Database(config.paths.database)
     try:
@@ -50,9 +52,10 @@ async def doctor(config: AppConfig, online: bool = False) -> dict:
         checks["database"] = {"status": "FAIL", "reason": type(exc).__name__}
     finally:
         database.close()
+    manager = BrowserManager(config.paths.profiles, channel=config.app.browser)
     checks["profiles"] = {
         p.value: {
-            "exists": (config.paths.profiles / profile_platform(p).value).is_dir(),
+            "exists": manager.profile_dir(p).is_dir(),
             "session_group": session_key(p),
             "login": "UNKNOWN",
             "reason": "Profile existence is not authentication evidence",
