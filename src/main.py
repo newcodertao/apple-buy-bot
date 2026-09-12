@@ -39,7 +39,9 @@ def parser() -> argparse.ArgumentParser:
         item.add_argument(
             "platform", choices=[p.value for p in Platform] + ["all"], default="all", nargs="?"
         )
-    run = commands.add_parser("run", help="按配置时间启动，控制台支持 resume / stop / status")
+    run = commands.add_parser(
+        "run", help="按配置时间启动，控制台支持 resume / finish / stop / status"
+    )
     run.add_argument("--now", action="store_true", help="跳过计划等待，立即执行")
     commands.add_parser("status", help="读取本地持久化运行记录；实时状态用 Web /status")
     web = commands.add_parser("web", help="启动仅本机可访问的状态页面和 JSON API")
@@ -104,18 +106,44 @@ def console_queue() -> asyncio.Queue:
 
 
 async def run_console(runtime, platforms, immediate, dry_run):
-    output({"purchase_plan": runtime.plan_snapshot()})
+    # Show existing transaction/session blocks before asking for a new purchase.
+    # Runtime.start repeats this check after any human confirmation wait.
+    for platform in Platform:
+        runtime._require_session_idle(platform)
+    plan = runtime.plan_snapshot()
+    output({"purchase_plan": plan})
+    queue = console_queue()
+    if plan.get("products") and (platforms is None or Platform.APPLE in platforms):
+        print(
+            "开始前一次确认：按展示的优先级、规格、数量和预算购买 Apple 中国大陆官网直售商品；"
+            "使用当前账户结算时选中的已保存地址，首次完整读取后在本机绑定，"
+            "内容变化或无法核验时暂停。付款方式按计划执行，提交开关保持本机配置。"
+        )
+        while not plan.get("approved"):
+            print(f"核对后请输入 confirm-start {plan['digest']}；plan 重看，stop 退出。")
+            parts = (await queue.get()).split()
+            if parts == ["stop"]:
+                return 0
+            if parts == ["plan"]:
+                plan = runtime.plan_snapshot()
+                output({"purchase_plan": plan})
+            elif len(parts) == 2 and parts[0] == "confirm-start":
+                try:
+                    output(await runtime.approve_plan(parts[1]))
+                    plan = runtime.plan_snapshot()
+                except BotError as exc:
+                    print(redact(str(exc)))
+        print("本次条件已确认；相同计划沿用本机确认，不重复询问。")
     await runtime.start(platforms, immediate=immediate, dry_run=dry_run)
     print(
-        "控制命令：plan / approve-plan <digest> / resume [platform] / confirm-address platform / "
-        "confirm-market platform / stop / status。"
-        "请先用 plan 查看购买条件，再用 approve-plan 和展示的 digest 确认该版本。"
-        "请在浏览器核对地址和国行版本，再输入对应确认命令。"
+        "控制命令：plan / resume [platform] / finish / stop / status。"
+        "finish 结束本机自动任务并留页，不取消订单或解除交易保护；stop 退出并关闭程序浏览器。"
+        "仅页面内容变化时，可核对后用 confirm-address apple 或 confirm-market apple 更新依据。"
     )
-    queue = console_queue()
     reader = asyncio.create_task(queue.get())
     stop_requested = False
     worker_failed = False
+    finished_locally = False
     try:
         while runtime.task and not runtime.task.done():
             done, _ = await asyncio.wait(
@@ -132,6 +160,9 @@ async def run_console(runtime, platforms, immediate, dry_run):
                     elif parts[0] == "stop":
                         stop_requested = True
                         await runtime.stop()
+                    elif parts[0] == "finish":
+                        output(await runtime.finish_task())
+                        finished_locally = True
                     elif parts[0] == "status":
                         output(runtime.snapshot())
                     elif parts[0] == "plan":
@@ -150,9 +181,7 @@ async def run_console(runtime, platforms, immediate, dry_run):
                         )
                     else:
                         print(
-                            "可用命令：plan / approve-plan <digest> / resume [platform] / "
-                            "confirm-address platform / "
-                            "confirm-market platform / stop / status"
+                            "可用命令：plan / resume [platform] / finish / stop / status"
                         )
                 except (ValueError, BotError) as exc:
                     print(redact(str(exc)))
@@ -175,6 +204,7 @@ async def run_console(runtime, platforms, immediate, dry_run):
             not stop_requested
             and (
                 worker_failed
+                or finished_locally
                 or any(
                     p["state"] in {"WAITING_HUMAN", "READY_TO_SUBMIT", "SUCCESS"}
                     for p in runtime.snapshot().get("platforms", {}).values()
@@ -191,6 +221,9 @@ async def run_console(runtime, platforms, immediate, dry_run):
                 break
             if command == "status":
                 output(runtime.snapshot())
+            elif command == "finish":
+                output(await runtime.finish_task())
+                finished_locally = True
             elif command == "plan":
                 output(runtime.plan_snapshot())
             elif command.startswith(("resume", "approve-plan")):
@@ -326,7 +359,7 @@ async def async_main(args) -> int:
     try:
         if args.command == "login":
             platform = Platform(args.platform)
-            runtime._require_session_idle(platform)
+            runtime._require_login_idle(platform)
             status = await runtime.manager.manual_login(platform, LOGIN_URLS[platform])
             output(
                 {

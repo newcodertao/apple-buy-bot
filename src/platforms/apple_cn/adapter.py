@@ -84,6 +84,10 @@ class AppleCNAdapter(InspectionAdapter):
         self._confirmed_address = ""
         self._confirmed_market = ""
         self.purchase_plan = None
+        self.bind_saved_address = None
+        self._saved_address_selected = False
+        self._product_target_digest = ""
+        self.excluded_sku_ids: set[str] = set()
 
     @property
     def cart_state(self) -> CartState:
@@ -103,9 +107,33 @@ class AppleCNAdapter(InspectionAdapter):
             if self.purchase_plan is not None
             else self._confirmed_address
         )
+        if (
+            fingerprint
+            and not expected
+            and self.purchase_plan is not None
+            and self.purchase_plan.approved_at is not None
+            and self.purchase_plan.address_basis == "selected_saved_address_first_checkout_bind"
+            and self._saved_address_selected
+            and self.bind_saved_address is not None
+        ):
+            self.bind_saved_address(fingerprint)
+            expected = self.purchase_plan.address_fingerprint
         return bool(fingerprint and fingerprint == expected)
 
     def _market_approved(self, fingerprint: str) -> bool:
+        plan = self.purchase_plan
+        if (
+            fingerprint
+            and plan is not None
+            and plan.approved_at is not None
+            and plan.market_basis == "apple_cn_direct_configured_product"
+            and self.selected is not None
+        ):
+            self._require_plan(self.selected, self._quantity)
+            return any(
+                p.product_id == self.product_id and p.target_digest == self._product_target_digest
+                for p in plan.products
+            )
         approved = (
             self.purchase_plan.market_fingerprints
             if self.purchase_plan is not None
@@ -152,6 +180,7 @@ class AppleCNAdapter(InspectionAdapter):
         except ValueError:
             raise ConfigurationError("Apple 商品入口必须属于中国大陆商店") from None
         await super().open_product(product_id, url)
+        self._product_target_digest = hashlib.sha256(url.encode()).hexdigest()
 
     async def _address_fingerprint(self) -> str:
         self._require_cn_store()
@@ -166,6 +195,10 @@ class AppleCNAdapter(InspectionAdapter):
                     .filter(([,text])=>text);
                 if(!keys.every(key=>fields.filter(([name])=>name==='form-field-'+key).length===1))
                     return null;
+                const maskedContact=new Set(['form-field-emailAddress',
+                    'form-field-fullDaytimePhone']);
+                if(fields.some(([name,text])=>!maskedContact.has(name)
+                    && /[*•●]/.test(text))) return null;
                 return fields.sort((a,b)=>JSON.stringify(a).localeCompare(JSON.stringify(b)));
             }""",
             ADDRESS_FIELDS,
@@ -197,9 +230,9 @@ class AppleCNAdapter(InspectionAdapter):
         expected = normalized(f"{sku.model} {sku.capacity} {sku.color}")
         if len(names) != 1 or normalized(names[0]) != expected:
             return ""
-        # The explicit local confirmation is bound to this exact visible item.
-        # A CN URL alone is NOT product-version proof. Any version text visible
-        # in that item's summary is included in the binding, never a page footer.
+        # Compare the exact visible item under the approved CN direct-store basis.
+        # This basis is not a claim that the page exposed a CH/A part number.
+        # Explicit overseas version text still contradicts the approved purchase.
         versions = await page.evaluate(
             """s => {
               const roots=[...document.querySelectorAll(s.summary),
@@ -323,7 +356,6 @@ class AppleCNAdapter(InspectionAdapter):
                         "Apple candidate search is limited to 64 configurations"
                     )
                 await self._locator("color").first.wait_for(state="attached")
-                skus = []
                 for model in prefs.model_priority:
                     for capacity in prefs.capacity_priority:
                         for color in prefs.color_priority:
@@ -331,9 +363,18 @@ class AppleCNAdapter(InspectionAdapter):
                                 sku = await self._configure(model, capacity, color)
                             except CandidateUnavailable:
                                 continue
-                            if sku.available and sku.price <= prefs.max_price:
-                                skus.append(sku)
-                return skus
+                            if (
+                                sku.id not in self.excluded_sku_ids
+                                and sku.available
+                                and sku.currency == "CNY"
+                                and sku.price <= prefs.max_price
+                                and (
+                                    prefs.max_total is None
+                                    or sku.price * prefs.quantity <= prefs.max_total
+                                )
+                            ):
+                                return [sku]
+                return []
             except (SelectorNotFound, PlaywrightTimeout):
                 await self._capture("sku_unknown", "WAITING_HUMAN")
                 raise SelectorNotFound(
@@ -429,7 +470,7 @@ class AppleCNAdapter(InspectionAdapter):
             if await self._locator("bag").is_visible():
                 await self._bag_check(quantity)
                 return
-            if self.cart_state != CartState.NOT_ATTEMPTED:
+            if self.cart_state != CartState.NOT_ATTEMPTED or self._submit_attempted:
                 raise HumanRequired("已尝试加购，请人工核对购物袋；禁止重复点击")
             current_market = await self._market_fingerprint()
             if not self._market_approved(current_market):
@@ -453,12 +494,10 @@ class AppleCNAdapter(InspectionAdapter):
             actual = parse_skus(
                 await self._snapshot(), product_id=self.product_id, model=self.selected.model
             )[0]
-            if (
-                actual.id != self.selected.id
-                or actual.price != self.selected.price
-                or not actual.available
-            ):
-                raise HumanRequired("加购前商品或库存已变化")
+            if actual.id != self.selected.id:
+                raise HumanRequired("加购前商品身份已变化，请核对当前页面")
+            if actual.price != self.selected.price or not actual.available:
+                raise CandidateUnavailable("首次加购前价格或库存已变化，请检查其他候选")
             add = self._locator("add_to_bag")
             if not await add.is_visible():
                 # The pre-order Continue branch has not yet become accessible.
@@ -608,6 +647,7 @@ class AppleCNAdapter(InspectionAdapter):
                 saved = self._locator("saved_address")
                 if not await saved.is_visible() or not await saved.is_checked():
                     raise HumanRequired("请在官网确认收货地址和联系方式后继续")
+                self._saved_address_selected = True
                 await shipping.click()
                 try:
                     await self._locator("payment_wechat").wait_for(state="attached", timeout=5000)
@@ -730,7 +770,17 @@ class AppleCNAdapter(InspectionAdapter):
             address_present=bool(address_fingerprint),
             address_fingerprint=address_fingerprint,
             address_confirmed=address_confirmed,
-            market_evidence="MANUAL_CN:" + market_fingerprint if market_verified else "",
+            market_evidence=(
+                (
+                    "APPROVED_APPLE_CN_DIRECT:"
+                    if self.purchase_plan is not None
+                    and self.purchase_plan.market_basis == "apple_cn_direct_configured_product"
+                    else "MANUAL_CN:"
+                )
+                + market_fingerprint
+                if market_verified
+                else ""
+            ),
             market_verified=market_verified,
             verification_present=False,
             checkout_valid=await self._locator("submit_order").is_enabled(),

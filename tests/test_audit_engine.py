@@ -473,56 +473,84 @@ async def test_confirmed_success_is_not_downgraded_by_audit_or_logging_failure(
         database.close()
 
 
-@pytest.mark.parametrize("failure_stage", ["select", "selector", "cart", "submit"])
+@pytest.mark.parametrize(
+    "failure_stage", ["select", "precart", "all_unavailable", "selector", "cart", "submit"]
+)
 async def test_candidate_fallback_is_allowed_only_for_confirmed_selection_failure(
     tmp_path, failure_stage
 ):
-    engine, adapters, database = make_engine(tmp_path, max_checks=2)
+    engine, adapters, database = make_engine(tmp_path, max_checks=3)
+    engine.config = engine.config.model_copy(
+        update={
+            "monitor": engine.config.monitor.model_copy(update={"normal_interval": 10, "jitter": 0})
+        }
+    )
     adapter = adapters[Platform.APPLE]
     first = adapter.sku
     second = first.model_copy(update={"id": "second-candidate", "capacity": "256GB"})
     selected = []
+    current = datetime.now(UTC)
+    excluded_seen = []
+    adapter.excluded_sku_ids = set()
 
     async def stock():
         await adapter.tick("check_stock")
-        if failure_stage == "select" and adapter.calls.count("check_stock") == 1:
-            return [first]
-        return [first, second]
+        excluded_seen.append(set(adapter.excluded_sku_ids))
+        # Match Apple's production first-match contract, not a fake returning
+        # every alternative for Engine to consume in the same stock check.
+        candidates = [first] if failure_stage == "all_unavailable" else [first, second]
+        return next(([sku] for sku in candidates if sku.id not in adapter.excluded_sku_ids), [])
 
-    async def skip_wait(stop, seconds):
+    async def advance(stop, seconds):
+        nonlocal current
+        current += timedelta(seconds=seconds)
         await asyncio.sleep(0)
         return not stop.is_set()
 
     async def select(sku):
         selected.append(sku.id)
         if sku.id == first.id:
-            if failure_stage == "select":
+            if failure_stage == "select" or (
+                failure_stage == "all_unavailable" and selected.count(first.id) == 1
+            ):
                 raise CandidateUnavailable("offline first candidate no longer available")
             if failure_stage == "selector":
                 raise SelectorNotFound("offline unknown selector is not missing stock")
         adapter.sku = sku
 
     adapter.check_stock, adapter.select_sku = stock, select
-    engine._waiter = skip_wait
+    engine._now, engine._waiter = lambda: current, advance
+    if failure_stage == "precart":
+        actual_cart = adapter.add_to_cart
+
+        async def precheck_then_cart(quantity):
+            if adapter.sku.id == first.id:
+                raise CandidateUnavailable("offline stock disappeared before first click")
+            await actual_cart(quantity)
+
+        adapter.add_to_cart = precheck_then_cart
     if failure_stage == "cart":
         adapter.cart_error = CandidateUnavailable("wrongly classified after cart click")
     if failure_stage == "submit":
         adapter.submit_error = CandidateUnavailable("wrongly classified after submit click")
     task = asyncio.create_task(engine.run(immediate=True))
     try:
-        if failure_stage == "selector":
+        if failure_stage in {"selector", "cart"}:
             await wait_state(engine, "WAITING_HUMAN")
             await engine.stop()
         await asyncio.wait_for(task, timeout=2)
-        if failure_stage == "select":
-            assert selected == [first.id, second.id]
-            assert (Platform.APPLE, first.product_id, first.id) in engine._candidate_cooldowns
+        if failure_stage in {"select", "precart", "all_unavailable"}:
+            expected_next = first.id if failure_stage == "all_unavailable" else second.id
+            assert selected == [first.id, expected_next]
+            assert excluded_seen[1] == {first.id}
+            if failure_stage == "all_unavailable":
+                assert excluded_seen[2] == set()
             assert database.guard_status()["status"] == "SUCCESS"
         else:
             assert selected == [first.id]
         assert adapter.calls.count("add_to_cart") == (0 if failure_stage == "selector" else 1)
         assert adapter.calls.count("submit_order") == (
-            1 if failure_stage in {"select", "submit"} else 0
+            1 if failure_stage in {"select", "precart", "all_unavailable", "submit"} else 0
         )
         if failure_stage == "submit":
             assert database.guard_status()["status"] == "UNKNOWN"

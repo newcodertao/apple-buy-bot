@@ -10,7 +10,7 @@ TRANSITIONS: dict[State, set[State]] = {
     State.MONITORING: {State.STOCK_FOUND},
     State.STOCK_FOUND: {State.SELECTING_SKU, State.MONITORING},
     State.SELECTING_SKU: {State.ADDING_CART, State.MONITORING},
-    State.ADDING_CART: {State.CHECKOUT},
+    State.ADDING_CART: {State.CHECKOUT, State.MONITORING},
     State.CHECKOUT: {State.VERIFYING},
     State.VERIFYING: {State.READY_TO_SUBMIT, State.MONITORING},
     State.WAITING_HUMAN: {

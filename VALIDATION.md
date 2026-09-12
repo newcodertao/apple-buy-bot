@@ -1,6 +1,75 @@
 # Apple 实页适配验收
 
-## 2026-09-11 购买计划与登录恢复（本轮，基线 1a330c8）
+## 2026-09-12 本轮：一次开始确认、候选继续和正常结束任务
+
+本机开工 HEAD：`222d6bbaf0fc6b58e14d19efdbe7f8bba56dcecc`。工作区已有六个未提交文件（engine、main、Apple adapter、runtime、test_audit_apple、test_session_control），先记录并接续，未重置或覆盖。基线证据为本机 `outputs/sep12-baseline.json`。完成后的提交号和远端核对见交付回复。
+
+**真实购买流程尚未通过。** 本轮正常入口的本地合成流程与真实网站分别列出；登录转圈、禁用 Continue 和原订单锁都是实际未完成项。没有新建真实订单、付款、取消订单、清空购物袋、删除 profile/数据库或释放原 guard。
+
+### 文件与原因
+
+| 文件 | 变更与边界 |
+|---|---|
+| `src/order/plan.py`、`src/runtime.py`、`src/platforms/apple_cn/adapter.py` | 原计划中明确 CN 官网直售目标、允许规格、数量、预算、付款和“当前账户选中的已保存地址首次完整读取后绑定”依据。开始前批准一次，同一内容沿用。真正看到保存地址选中且完整读取后才保存摘要；字段遮挡/地址变化暂停。商品实时核对批准入口与精确 SKU，可见海外版本仍拒绝；`APPROVED_APPLE_CN_DIRECT` 表示批准依据，不谎称读取到国行型号证明。配置/条款变化撤销旧批准，保存失败不启用新批准 |
+| `src/main.py`、`src/web/api.py`、`src/web/index.html` | CLI `confirm-start <digest>` 与网页开始弹窗合并确认。CLI 先检查已有保护再等待输入。新增 CLI `finish`、Web“结束本机任务”及 `/finish-task`，等待任务停止、留页、保留记录与加购/订单保护；不等于取消订单。原 API 不能关闭 dry-run 或开启 auto_submit |
+| `src/browser/manager.py` | 显式 `chromium_sandbox=True`，取消 Playwright 默认关闭沙盒造成的启动差异。本地浏览器回归通过，但原登录窗口仍待关闭，尚不能确认该差异就是 Apple 登录转圈的原因；没有改变身份、代理或跳过平台验证 |
+| `src/platforms/apple_cn/adapter.py`、`src/core/engine.py`、`src/core/state_machine.py` | 返回首个符合优先级和总预算的实际候选。首次加购前明确价格/库存失效可回退；身份/全局页面结构变化仍暂停。冷却至少跨下一次候选枚举，避免等待后总选回失效首选。任何已尝试或未知加购/提交不换候选、不重放 |
+| `tests/test_runtime_purchase_plan.py`、既有 CLI/Web、Apple、Engine、会话测试 | 从普通 Runtime、CLI/Web 控制入口核对一次确认、首次登录暂停恢复、单次加购、地址变化、冷却回退和正常结束任务；均使用本地页面或故障注入，不能替代官网 |
+
+### 本轮逐步结果
+
+| 步骤 | 实际方法/动作 | 本地页面或模拟 | 真实网站/程序专用 profile |
+|---|---|---|---|
+| 开始前确认 | CLI `run_console` / Web 开始 → `Runtime.approve_plan` → `Runtime.start` | 普通入口只确认一次；未批准不开始，同一批准复用 | 未代替用户批准真实计划；正常 Web `/start` 返回 HTTP 409，原 SUCCESS guard 阻止启动 |
+| 登录 | CLI `src.main login apple` → `BrowserManager.manual_login`；运行中 `login_status` / `check_login` / `resume` | REQUIRED/UNKNOWN 暂停，实际合成账户控件认证后继续原流程 | **BLOCKED**：已实际打开原专用 profile，用户反馈登录持续转圈；未把打开页面或 profile 存在记为成功，等待关闭卡住窗口以复查现有登录状态 |
+| 商品与规格 | `check_stock/get_skus` → `select_sku` | 首个符合候选即继续；明确失效才安全回退 | **PASS（普通 Chrome 公开商品观察）**：约13:35选择 Pro Max / 512GB / 黑色，RMB12,999；不是程序独立 profile 验收 |
+| 新品 Continue | 官网页面配置完成后读取可见控件 | 启用却未知的 Continue 分支仍停止 | **NOT RUN（后续）**：配置完整后仍“暂未发售”，Continue disabled；页面写当日20:00接受预购，没有启用或点击禁用控件 |
+| 加购一次/袋核验 | `add_to_cart` → `_bag_check`；未知时 `verify_cart` | 加购1次，精确商品/数量/总额成立后 CART_VERIFIED；已点击未知只读袋 | **NOT RUN**：未修改真实购物袋；普通 Chrome 原袋标记1件保留 |
+| 真实结算 | `goto_checkout` → `verify_order` → `_read_review` | 合成 checkout 经真实 Adapter 到 READY_TO_SUBMIT，submit与付款调用0 | **NOT RUN**：未到真实 checkout，不能声称登录后购买已跑通 |
+| 地址/付款 | 已保存地址、首次完整摘要绑定；当前方案复核 | 无第二次批准；变更/遮挡暂停，错误金额拒绝 | **NOT RUN**：本轮未读真实地址和分期完整计划，未点击银行授权/微信付款 |
+| 结束旧任务 | Web 按钮 → `/finish-task` → `Runtime.finish_task` | 工作任务取消并等待，原记录、页面和副作用状态保留 | **PASS（本机真实服务）**：已实际点击结束按钮；页面仍显示 SUCCESS 与禁止提交，未清订单锁 |
+
+### 统一检查与本轮命令
+
+首轮完整 pytest：**267 passed、1 failed、3 warnings，100.22秒**。失败为 `test_address_and_market_confirmation_bind_the_current_item`：新增必需字段筛选漏掉 street2，导致补充地址改变未撤销确认。已修复为保留原完整表单字段摘要，地址遮挡仍停止，已保存遮挡联系方式不误判为缺地址；原失败断言不改。针对性地址/加购/正常 Runtime 复查 **6 passed，13.18秒**。
+
+最终完整 pytest：**PASS，271 passed，0 failed、0 skipped，3 warnings，125.14秒**，证据 `outputs/sep12-final.txt/.xml`。Ruff `src tests`、compileall `src tests`、提取当前 Web 脚本后的 `node --check`、`git diff --check` 均退出0。最后一次检查包含恢复 Chrome 沙盒的代码；之后只改文档。3条 warning 为 Starlette/httpx/anyio 弃用及既有测试替身的 Decimal 序列化提示，不表示官网通过。
+
+首轮证据 `outputs/sep12-full.txt/.xml` 保留失败记录。针对性 `outputs/sep12-address-cart.xml` 为6项通过；`outputs/entry-controls.xml` 为37项通过；`outputs/confirm-once-local.xml` 为4项通过。候选竞争失效的注入时钟复现修前3失败/3通过，修后6通过（1.27秒，`outputs/candidate-fallback-local.xml`）。这些通过数不相加充当全量。
+
+实际命令（工作目录仓库根，PowerShell 7，`.venv`；无真实购买命令）：
+
+```powershell
+git status --short
+git rev-parse HEAD
+.\.venv\Scripts\python.exe -u -m src.main login apple
+.\.venv\Scripts\python.exe -u -m src.main web --port 8766
+.\.venv\Scripts\python.exe -m pytest -q --tb=short --junitxml=outputs/sep12-full.xml
+.\.venv\Scripts\python.exe -m pytest -q --tb=short --junitxml=outputs/sep12-final.xml
+.\.venv\Scripts\python.exe -m pytest tests/test_audit_apple.py::test_address_and_market_confirmation_bind_the_current_item tests/test_apple_cart_resume.py::test_confirmation_before_add_resumes_first_click_then_verifies tests/test_runtime_purchase_plan.py -q --tb=short --junitxml=outputs/sep12-address-cart.xml
+.\.venv\Scripts\python.exe -m ruff check src tests
+.\.venv\Scripts\python.exe -m compileall -q src tests
+node --check outputs/sep12-web.js
+git diff --check
+git ls-remote origin refs/heads/main
+.\.venv\Scripts\python.exe -m src.main dry-run apple
+```
+
+完整 pytest 进程仅移除三个可选凭据环境变量（STATE_FILE/USERNAME/PASSWORD），不修改用户环境或文件。真实 UI 使用 Chrome 扩展：公开商品选择及本机 Web 结束按钮；本机 `/start` 请求为 `platforms=[apple], immediate=true, dry_run=true`，结果409，没有工作者、没有提交。最终 CLI `dry-run apple` 在任何确认等待前报告 SUCCESS 保护，退出2；此前一次未设 UTF-8 的捕获输出乱码，重新以 `PYTHONIOENCODING=utf-8` 核对，未改变运行保护。
+
+原数据库前后只读核对：SUCCESS guard 一条，全部字段按 tuple JSON 序列化 SHA256 始终为 `3c00c641d5215b0e570ab8aad8f424ae3c6d135d190aeb4f8b0ed710dc55af08`，后验记录为 `outputs/sep12-guard-after.json`。订单记录状态 SUCCESS，付款状态 UNKNOWN；不根据历史日期推断取消或已付款。本轮需要先明确现有订单情况才可能安排后续交易演练，正常结束任务不会解除这项保护。
+
+### 未完成
+
+- 程序专用 Chrome 登录持续转圈的原因与恢复、实际认证及重开复用：尚未验证。
+- Continue 启用后的真实流程：尚未访问到，不猜选择器。
+- 程序普通入口→真实购物袋→真实结算→READY_TO_SUBMIT：NOT RUN，不能用合成链替代。
+- 既有 SUCCESS 记录没有本轮已付款/已取消/无订单的可靠证据，保护保留。
+- 未新增任何真实订单；其他平台不在本轮推进范围。
+
+---
+
+## 历史：2026-09-11 购买计划与登录恢复（基线 1a330c8）
 
 开工实际 HEAD：`1a330c80880aade9200549741e1226679ae63caa`，`git status --short` 为空。未覆盖用户未提交工作。本轮沿用现有工程，不扩平台。最终提交号及推送核对见本次交付回复；本节的结果与下方历史审核分开。
 

@@ -5,7 +5,7 @@ import asyncio
 import pytest
 
 import src.main as cli
-from src.core.exceptions import HumanRequired
+from src.core.exceptions import ConfigurationError, HumanRequired
 from src.core.models import CartState, LoginStatus, Platform, State
 from src.runtime import Runtime
 from tests.test_engine import FakeAdapter, QuietNotifier, make_engine
@@ -195,6 +195,7 @@ def local_runtime(tmp_path, monkeypatch):
 
 async def test_runtime_each_run_checks_expired_login_before_any_cart_action(tmp_path, monkeypatch):
     runtime, adapter = local_runtime(tmp_path, monkeypatch)
+    await runtime.approve_plan(runtime.plan_snapshot()["digest"])
     adapter.login = LoginStatus.REQUIRED
     try:
         for run_number in (1, 2):
@@ -216,6 +217,7 @@ async def test_console_parent_failure_preserves_runtime_page_until_stop(
     tmp_path, monkeypatch, capsys
 ):
     runtime, adapter = local_runtime(tmp_path, monkeypatch)
+    await runtime.approve_plan(runtime.plan_snapshot()["digest"])
     queue = asyncio.Queue()
     monkeypatch.setattr(cli, "console_queue", lambda: queue)
     monkeypatch.setattr(cli, "load_config", lambda path: runtime.config)
@@ -252,11 +254,21 @@ async def test_console_parent_failure_preserves_runtime_page_until_stop(
         await runtime.close()
 
 
-async def test_console_plan_approval_requires_the_displayed_digest(tmp_path, monkeypatch):
+@pytest.mark.parametrize("guard_status", [None, "SUCCESS"])
+async def test_console_plan_approval_requires_the_displayed_digest(
+    tmp_path, monkeypatch, guard_status
+):
     runtime, adapter = local_runtime(tmp_path, monkeypatch)
     adapter.login = LoginStatus.REQUIRED
     queue = asyncio.Queue()
     monkeypatch.setattr(cli, "console_queue", lambda: queue)
+    if guard_status:
+        assert runtime.database.claim_order("fixture-owner:apple")
+        runtime.database.mark_submission("fixture-owner:apple", "SUBMITTING")
+        runtime.database.mark_submission("fixture-owner:apple", guard_status)
+        monkeypatch.setattr(
+            cli, "console_queue", lambda: pytest.fail("Order guard must precede input waiting")
+        )
     approved = asyncio.Event()
     original_approve = runtime.approve_plan
 
@@ -269,18 +281,29 @@ async def test_console_plan_approval_requires_the_displayed_digest(tmp_path, mon
     monkeypatch.setattr(runtime, "approve_plan", observe_approval)
     task = asyncio.create_task(cli.run_console(runtime, [Platform.APPLE], True, True))
     try:
+        if guard_status:
+            with pytest.raises(ConfigurationError, match=guard_status):
+                await asyncio.wait_for(task, 2)
+            assert not runtime.plan_snapshot()["approved"]
+            assert not approved.is_set()
+            assert runtime.task is None and not adapter.calls
+            assert runtime.database.guard_status()["status"] == guard_status
+            return
+        await asyncio.sleep(0)
+        assert runtime.task is None, "No worker may start before the local confirmation"
+        queue.put_nowait("confirm-start stale-digest")
+        await asyncio.wait_for(approved.wait(), 2)
+        assert not runtime.plan_snapshot()["approved"]
+        assert runtime.task is None
+        approved.clear()
+        queue.put_nowait("plan")
+        queue.put_nowait("confirm-start " + runtime.plan_snapshot()["digest"])
+        await asyncio.wait_for(approved.wait(), 2)
+        assert runtime.plan_snapshot()["approved"]
         await settled(
             task,
             lambda: runtime.snapshot()["platforms"]["apple"]["state"] == "WAITING_HUMAN",
         )
-        queue.put_nowait("approve-plan stale-digest")
-        await asyncio.wait_for(approved.wait(), 2)
-        assert not runtime.plan_snapshot()["approved"]
-        approved.clear()
-        queue.put_nowait("plan")
-        queue.put_nowait("approve-plan " + runtime.plan_snapshot()["digest"])
-        await asyncio.wait_for(approved.wait(), 2)
-        assert runtime.plan_snapshot()["approved"]
         assert adapter.clicks == 0
         queue.put_nowait("stop")
         assert await asyncio.wait_for(task, 2) == 0

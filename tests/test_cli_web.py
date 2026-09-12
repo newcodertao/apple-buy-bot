@@ -80,6 +80,17 @@ def test_web_reads_and_control_boundary(tmp_path):
             == 403
         )
         assert client.get("/status").json()["order_guard"] is None
+        assert client.post("/finish-task").status_code == 403
+        database = app.state.runtime.database
+        assert database.claim_order("fixture-owner")
+        database.mark_submission("fixture-owner", "SUBMITTING")
+        database.mark_submission("fixture-owner", "SUCCESS")
+        orders = database.recent("orders", 10)
+        result = client.post("/finish-task", headers=headers)
+        assert result.status_code == 200
+        assert result.json()["ended"] and not result.json()["can_start_new_task"]
+        assert database.guard_status()["status"] == "SUCCESS"
+        assert database.recent("orders", 10) == orders
 
 
 def test_cli_status_uses_sqlite_history(tmp_path, capsys):

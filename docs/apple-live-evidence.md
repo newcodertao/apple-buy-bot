@@ -1,6 +1,16 @@
 # Apple 中国大陆页面观察与适配边界
 
-观察日期：2026-09-10。所有交易页面均经用户授权在 Chrome 正常操作；没有直接调用下单接口。下列结构来自页面 DOM。随机 React ID、订单标识、账户和地址均不列入仓库。
+## 2026-09-12 本轮：普通 Chrome 公开商品页
+
+约 13:35（Asia/Shanghai），使用 Chrome 扩展连接打开 [iPhone 18 Pro 商品页](https://www.apple.com.cn/shop/buy-iphone/iphone-18-pro)，通过页面可见 radio 依次选择 Pro Max、黑色、512GB、不折抵换购、不加 AppleCare+ 服务计划。不是程序专用 profile，也没有调用 Adapter 替代普通 Runtime 验收。
+
+页面最终摘要为 **iPhone 18 Pro Max 512GB 黑色，RMB 12,999**；五组选项均选中，配送仍为“暂未发售”。页面提示“9 月 12 日晚 8 点接受预购。下周五 18 日发售。”继续按钮实测 `BUTTON[data-autom="continueButton"]`、`type="button"`、`disabled=true`。没有点击或启用该按钮，没有修改购物袋；页头原来已有 1 件标记。
+
+这次新增证据确认：完成全部规格选择后，Continue 仍不可用。因此 **Continue 启用后的页面、加购及结算为 NOT RUN**；不根据禁用按钮虚构下一页选择器。程序实际登录窗口已打开，但用户反馈持续转圈，尚未认证，单独记录于 VALIDATION.md。
+
+## 历史：2026-09-10
+
+以下观察不是本轮执行结果。所有交易页面均经用户当时授权在 Chrome 正常操作；没有直接调用下单接口。下列结构来自当时页面 DOM。随机 React ID、订单标识、账户和地址均不列入仓库。
 
 ## 商品配置
 

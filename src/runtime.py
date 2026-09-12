@@ -100,6 +100,38 @@ class Runtime:
         adapter = self.adapters.get(Platform.APPLE)
         if isinstance(adapter, AppleCNAdapter):
             adapter.purchase_plan = self.purchase_plan
+            adapter.bind_saved_address = self._bind_saved_address
+
+    def _bind_saved_address(self, fingerprint: str) -> None:
+        """Persist the first complete saved address under the approved start terms."""
+        plan = self.purchase_plan
+        if (
+            plan.approved_at is None
+            or plan.address_basis != "selected_saved_address_first_checkout_bind"
+            or not fingerprint
+            or (plan.address_fingerprint and plan.address_fingerprint != fingerprint)
+        ):
+            raise ConfigurationError("收货地址未获本次授权或已经变化，请在官网核对")
+        if plan.address_fingerprint == fingerprint:
+            return
+        updated = plan.model_copy(update={"address_fingerprint": fingerprint})
+        save_plan(self._plan_path, updated)
+        self.purchase_plan = updated
+        self._bind_plan()
+
+    def _require_login_idle(self, platform: Platform) -> None:
+        # A recorded order prevents another purchase, not logging in to review it.
+        # Never navigate away from an owned checkout or an in-flight task.
+        adapter = self.adapters.get(platform)
+        if (
+            platform == Platform.APPLE
+            and not (self.task and not self.task.done())
+            and self.manager.current_page(platform) is None
+            and not getattr(adapter, "_cart_attempted", False)
+            and not getattr(adapter, "_submit_attempted", False)
+        ):
+            return
+        self._require_session_idle(platform)
 
     def plan_snapshot(self) -> dict:
         plan = self.purchase_plan
@@ -129,7 +161,7 @@ class Runtime:
 
     async def open_login(self, platform: Platform = Platform.APPLE) -> dict:
         async with self._control:
-            self._require_session_idle(platform)
+            self._require_login_idle(platform)
             page = await self.manager.open_visible(platform)
             # The same adapter domain guard also checks login navigation redirects.
             await self.adapters[platform]._navigate(page, LOGIN_URLS[platform])
@@ -324,6 +356,12 @@ class Runtime:
                 raise ConfigurationError(
                     "No enabled product URLs; inspect and configure real URLs first"
                 )
+            if (
+                any(p == Platform.APPLE for p, _, _ in self.config.targets(platforms))
+                and isinstance(self.adapters.get(Platform.APPLE), AppleCNAdapter)
+                and self.purchase_plan.approved_at is None
+            ):
+                raise ConfigurationError("请先一次确认本次商品、预算、已保存地址依据和付款方式")
             if self.task:
                 # Retrieve any exception before replacing task, avoiding silent background failures.
                 with contextlib.suppress(asyncio.CancelledError, Exception):
@@ -353,6 +391,36 @@ class Runtime:
         async with self._control:
             await self._stop_locked()
             return {"status": "stopped"}
+
+    async def finish_task(self) -> dict:
+        """End local automation without closing pages or reconciling any order."""
+        async with self._control:
+            await self._stop_locked()
+            guard = self.database.guard_status()
+            retained = {}
+            for platform, adapter in self.adapters.items():
+                cart_state = getattr(adapter, "cart_state", CartState.NOT_ATTEMPTED)
+                if (
+                    getattr(adapter, "_cart_attempted", False)
+                    or getattr(adapter, "_submit_attempted", False)
+                    or cart_state != CartState.NOT_ATTEMPTED
+                ):
+                    retained[platform.value] = {
+                        "cart_state": str(cart_state),
+                        "submit_attempted": bool(getattr(adapter, "_submit_attempted", False)),
+                    }
+            blocked = bool(guard or retained)
+            return {
+                "status": (
+                    "本机任务已结束，浏览器与订单记录保留；已有交易保护仍需人工核对"
+                    if blocked
+                    else "本机任务已结束，浏览器与记录保留；可以开始下一次任务"
+                ),
+                "ended": True,
+                "can_start_new_task": not blocked,
+                "order_guard": guard["status"] if guard else None,
+                "retained_protection": retained,
+            }
 
     async def resume(self, platform=None) -> dict:
         if not self.task or self.task.done():

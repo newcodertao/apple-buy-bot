@@ -22,9 +22,13 @@ class ConsoleRuntime:
         self.worker_started = asyncio.Event()
         self.hold_observed = asyncio.Event()
         self.resume_calls = 0
+        self.finish_calls = 0
 
     def plan_snapshot(self):
-        return {"products": [], "approved": False, "digest": "fixture-plan"}
+        return {"products": [], "approved": True, "digest": "fixture-plan"}
+
+    def _require_session_idle(self, platform):
+        pass
 
     async def start(self, platforms, immediate=False, dry_run=None):
         async def worker():
@@ -54,6 +58,11 @@ class ConsoleRuntime:
     async def resume(self, platform=None):
         self.resume_calls += 1
 
+    async def finish_task(self):
+        await self.stop()
+        self.finish_calls += 1
+        return {"ended": True, "order_guard": "UNKNOWN"}
+
     async def close(self):
         await self.stop()
         self.closed = True
@@ -70,7 +79,7 @@ def configure_console(monkeypatch, tmp_path, runtime):
     return args, queue
 
 
-@pytest.mark.parametrize("exit_action", ["stop", "browser_close"])
+@pytest.mark.parametrize("exit_action", ["stop", "browser_close", "finish_then_stop"])
 async def test_completed_unknown_worker_keeps_browser_open_until_user_exits(
     tmp_path,
     monkeypatch,
@@ -84,7 +93,15 @@ async def test_completed_unknown_worker_keeps_browser_open_until_user_exits(
         assert runtime.task.done(), "The ambiguous worker must already have finished"
         assert not task.done(), "The CLI must hold the browser even after its worker finishes"
         assert not runtime.closed
-        if exit_action == "stop":
+        if exit_action == "finish_then_stop":
+            queue.put_nowait("finish")
+            async with asyncio.timeout(1):
+                while not runtime.finish_calls:  # noqa: ASYNC110
+                    await asyncio.sleep(0)
+            assert not runtime.closed and not task.done()
+            assert runtime.snapshot()["order_guard"]["status"] == "UNKNOWN"
+            queue.put_nowait("stop")
+        elif exit_action == "stop":
             queue.put_nowait("stop")
         else:
             runtime.closed = True

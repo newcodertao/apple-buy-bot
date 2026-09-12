@@ -212,6 +212,7 @@ class BrowserManager:
                     user_data_dir=str(self.profiles_dir / platform.value),
                     channel=BROWSER_CHANNEL,
                     headless=headless,
+                    chromium_sandbox=True,
                     accept_downloads=False,
                     viewport={"width": 1280, "height": 900},
                     **(

@@ -7,7 +7,7 @@ import pytest
 from playwright.async_api import TimeoutError as PlaywrightTimeout
 from test_apple_live_flow import apple_page  # noqa: F401
 
-from src.core.exceptions import HumanRequired
+from src.core.exceptions import CandidateUnavailable, HumanRequired
 from src.core.models import CartState, LoginStatus
 
 SNAPSHOT = {
@@ -58,6 +58,17 @@ async def test_confirmation_before_add_resumes_first_click_then_verifies(apple_p
     assert not adapter._cart_attempted
     assert adapter.cart_state == CartState.NOT_ATTEMPTED
     await adapter.confirm_market()
+    # Definite loss before the first click is safe to hand back to candidate search.
+    for changes in ({"price": ["RMB 6800"]}, {"add": [{"enabled": False}]}):
+        async def changed_snapshot(changes=changes):
+            return {**SNAPSHOT, **changes}
+
+        monkeypatch.setattr(adapter, "_snapshot", changed_snapshot)
+        with pytest.raises(CandidateUnavailable):
+            await adapter.add_to_cart(1)
+        assert adapter.cart_state == CartState.NOT_ATTEMPTED
+        assert await page.locator("body").get_attribute("data-adds") is None
+    monkeypatch.setattr(adapter, "_snapshot", snapshot)
     await adapter.add_to_cart(1)
     assert adapter.cart_state == CartState.CART_VERIFIED
     assert await page.locator("body").get_attribute("data-adds") == "1"

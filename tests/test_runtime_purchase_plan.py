@@ -46,6 +46,17 @@ async def test_runtime_first_login_plan_product_address_and_resume(tmp_path, mon
     logged_in = False
     login_url = "/shop/signIn/account"
     logged_out_nav = '<nav><a href="/shop/signIn/account">登录</a></nav>'
+    checkout_steps = f"""
+        <input type="radio" data-autom="saved-address" checked>
+        <button data-autom="shipping-continue-button" onclick="this.hidden=true;
+          document.querySelector('#fixture-payment').hidden=false">继续选择付款方式</button>
+        <div id="fixture-payment" hidden>
+          <input type="radio" data-autom="checkout-billingOptions-WECHAT">
+          <button data-autom="continue-button-review" onclick="fixtureReview()">检查订单</button>
+        </div><script>function fixtureReview() {{
+          document.body.innerHTML = {json.dumps(ACCOUNT_NAV + CHECKOUT)};
+        }}</script>
+    """
 
     async def local_open(platform, headless):
         page = await original_open(platform, headless)
@@ -66,7 +77,7 @@ async def test_runtime_first_login_plan_product_address_and_resume(tmp_path, mon
             if parsed.path == login_url:
                 body = (
                     '<a id="complete-local-login" href="/shop/fixture-login-ok">'
-                    '完成本地模拟登录</a>'
+                    "完成本地模拟登录</a>"
                 )
             else:
                 if parsed.path == "/shop/fixture-login-ok":
@@ -76,7 +87,7 @@ async def test_runtime_first_login_plan_product_address_and_resume(tmp_path, mon
                     "/shop/fixture-login-ok": PRODUCT,
                     "/shop/attach": ATTACH,
                     "/shop/bag": BAG,
-                    "/shop/checkout": CHECKOUT,
+                    "/shop/checkout": checkout_steps,
                 }
                 body = (ACCOUNT_NAV if logged_in else logged_out_nav) + pages[parsed.path]
             await request_route.fulfill(
@@ -111,6 +122,16 @@ async def test_runtime_first_login_plan_product_address_and_resume(tmp_path, mon
         assert runtime.plan_snapshot()["approved"] is False
         # No Adapter call or confirmation was made before the normal Runtime start.
         assert calls == [] and runtime.manager.current_page(Platform.APPLE) is None
+        with pytest.raises(ConfigurationError, match="一次确认"):
+            await runtime.start([Platform.APPLE], immediate=True, dry_run=True)
+        assert calls == [] and runtime.task is None
+        # One explicit start confirmation authorizes the named basis, not an
+        # address or product page which has not yet been read.
+        plan = runtime.plan_snapshot()
+        assert plan["address_basis"] == "selected_saved_address_first_checkout_bind"
+        assert plan["market_basis"] == "apple_cn_direct_configured_product"
+        assert not plan["address_confirmed"]
+        await runtime.approve_plan(plan["digest"])
         await runtime.start([Platform.APPLE], immediate=True, dry_run=True)
         await paused(runtime, "Login")
         page = runtime.manager.current_page(Platform.APPLE)
@@ -119,31 +140,35 @@ async def test_runtime_first_login_plan_product_address_and_resume(tmp_path, mon
         await page.locator("#complete-local-login").click()  # Synthetic human, not credentials.
         assert (await runtime.check_login())["login"] == "AUTHENTICATED"
         await runtime.resume(Platform.APPLE)
-
-        await paused(runtime, "购买计划")
-        await runtime.approve_plan(runtime.plan_snapshot()["digest"])
-        await runtime.resume(Platform.APPLE)
-        await paused(runtime, "国行")
-        assert adapter.cart_state == CartState.NOT_ATTEMPTED and actions == []
-        await runtime.confirm_checkout(Platform.APPLE, "market")
-        await runtime.resume(Platform.APPLE)
-
-        await paused(runtime, "address")
-        assert actions == ["add", "view_bag", "checkout"]
-        assert adapter.cart_state == CartState.CART_VERIFIED
-        await runtime.confirm_checkout(Platform.APPLE, "address")
-        await runtime.resume(Platform.APPLE)
+        # No second product/address approval: the real adapter reads the local
+        # saved-address selection and binds its first complete review summary.
         await asyncio.wait_for(runtime.task, timeout=10)
         snapshot = runtime.snapshot()
         assert snapshot["platforms"]["apple"]["state"] == "READY_TO_SUBMIT"
         assert snapshot["dry_run"] is True
         assert actions == ["add", "view_bag", "checkout"]
+        assert adapter.cart_state == CartState.CART_VERIFIED
         assert "submit_order" not in calls and not page.is_closed()
         assert snapshot["order_guard"]["status"] == "CLAIMED"
         plan_text = runtime._plan_path.read_text(encoding="utf-8")
         assert "测试地址" not in plan_text
         assert json.loads(plan_text)["address_fingerprint"]
         approved = runtime.purchase_plan
+        review = await adapter.verify_order()
+        assert review.address_confirmed and review.market_verified
+        assert review.market_evidence.startswith("APPROVED_APPLE_CN_DIRECT:")
+        assert runtime.purchase_plan is approved  # Stable contents do not write a new approval.
+        await page.locator('[data-autom="form-field-street"]').evaluate(
+            "e=>e.innerText='变更后的测试地址'"
+        )
+        assert not (await adapter.verify_order()).address_confirmed
+        assert runtime.purchase_plan is approved
+        await page.locator('[data-autom="form-field-street"]').evaluate("e=>e.innerText='***'")
+        assert not (await adapter.verify_order()).address_present
+        await page.locator('[data-autom="bag-items"] > li').evaluate(
+            "e=>e.innerHTML += '<span> 港版</span>'"
+        )
+        assert not (await adapter.verify_order()).market_verified
         rebuilt = runtime._build_adapters()[Platform.APPLE]
         # Runtime.start preserves the live instance; even stop cannot reset its cart attempt.
         await runtime.stop()
@@ -155,7 +180,7 @@ async def test_runtime_first_login_plan_product_address_and_resume(tmp_path, mon
         await runtime.close()
 
 
-async def test_plan_persists_and_config_changes_require_fresh_approval(tmp_path):
+async def test_plan_persists_and_config_changes_require_fresh_approval(tmp_path, monkeypatch):
     config = configuration(tmp_path)
     runtime = Runtime(config)
     await runtime.approve_plan(runtime.plan_snapshot()["digest"])
@@ -164,6 +189,17 @@ async def test_plan_persists_and_config_changes_require_fresh_approval(tmp_path)
     try:
         assert reopened.plan_snapshot()["approved"]
         assert reopened.adapters[Platform.APPLE].purchase_plan == reopened.purchase_plan
+        original_plan = reopened.purchase_plan
+
+        def failed_save(*args):
+            raise ConfigurationError("injected local save failure")
+
+        with monkeypatch.context() as patch:
+            patch.setattr("src.runtime.save_plan", failed_save)
+            with pytest.raises(ConfigurationError, match="injected"):
+                reopened._bind_saved_address("fixture-address-digest")
+        assert reopened.purchase_plan is original_plan
+        assert not reopened.purchase_plan.address_fingerprint
         changed = config.model_copy(
             update={"order": config.order.model_copy(update={"payment_method": "installments"})}
         )
@@ -179,6 +215,15 @@ async def test_plan_persists_and_config_changes_require_fresh_approval(tmp_path)
         assert not changed_runtime.purchase_plan.address_fingerprint
     finally:
         await changed_runtime.close()
+    old = json.loads(runtime._plan_path.read_text(encoding="utf-8"))
+    old["address_basis"] = "confirm_current_checkout"
+    old.pop("market_basis")
+    runtime._plan_path.write_text(json.dumps(old), encoding="utf-8")
+    legacy = Runtime(config)
+    try:
+        assert not legacy.plan_snapshot()["approved"]
+    finally:
+        await legacy.close()
 
 
 def test_plan_api_requires_exact_explicit_approval_without_submission_switches(tmp_path):

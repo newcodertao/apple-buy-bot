@@ -359,13 +359,22 @@ class Engine:
         preferences = self.config.preferences_for(sku.product_id)
         try:
             await self._action(platform, State.SELECTING_SKU, "select_sku", sku)
+            await self._action(platform, State.ADDING_CART, "add_to_cart", preferences.quantity)
         except CandidateUnavailable as exc:
+            adapter = self.adapters[platform]
+            if (
+                getattr(adapter, "cart_state", CartState.NOT_ATTEMPTED) != CartState.NOT_ATTEMPTED
+                or getattr(adapter, "_cart_attempted", False)
+                or getattr(adapter, "_submit_attempted", False)
+            ):
+                # A misclassified post-click error ends this worker in place.
+                # Do not let its human-resume path reopen the product page.
+                raise
             self._candidate_cooldowns[(platform, sku.product_id, sku.id)] = self._now() + timedelta(
                 seconds=max(10, self._interval(platform))
             )
             self._transition(platform, State.MONITORING, redact(str(exc)))
             return False
-        await self._action(platform, State.ADDING_CART, "add_to_cart", preferences.quantity)
         await self._capture(platform, "cart")
         await self._notify("cart", "成功加入购物车", platform)
         await self._action(platform, State.CHECKOUT, "goto_checkout")
@@ -526,7 +535,22 @@ class Engine:
                         await self._call(platform, "open_product", product_id, url)
                         await self._ensure_clear(platform, State.MONITORING)
                     current["checks"] += 1
+                    # An expired cooldown still excludes one actual enumeration.
+                    # Otherwise a polling interval longer than the cooldown can
+                    # keep selecting the same competing first-match SKU forever.
+                    excluded = {
+                        sku_id
+                        for channel, product, sku_id in self._candidate_cooldowns
+                        if channel == platform and product == product_id
+                    }
+                    if platform == Platform.APPLE and hasattr(
+                        self.adapters[platform], "excluded_sku_ids"
+                    ):
+                        self.adapters[platform].excluded_sku_ids = excluded
                     skus = await self._call(platform, "check_stock")
+                    for candidate_key, until in list(self._candidate_cooldowns.items()):
+                        if candidate_key[:2] == (platform, product_id) and until <= self._now():
+                            del self._candidate_cooldowns[candidate_key]
                     status.last_check = datetime.now(UTC)
                     for sku in skus:
                         self.database.record_stock(
@@ -541,7 +565,8 @@ class Engine:
                     candidates = [
                         sku
                         for sku in rank_skus(skus, self.config.preferences_for(product_id))
-                        if self._candidate_cooldowns.get(
+                        if sku.id not in excluded
+                        and self._candidate_cooldowns.get(
                             (platform, product_id, sku.id), self._now()
                         )
                         <= self._now()

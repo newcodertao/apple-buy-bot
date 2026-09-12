@@ -174,7 +174,25 @@ async def test_get_skus_returns_verified_fallbacks_and_empty_candidates(apple_pa
     )
     await page.set_content(PRODUCT)
     skus = await adapter.get_skus()
-    assert [sku.color for sku in skus] == ["黑色", "白色"]
+    assert [sku.color for sku in skus] == ["黑色"]
+    assert await page.locator("#black").is_checked()
+    adapter.excluded_sku_ids = {skus[0].id}
+    fallback = await adapter.check_stock()
+    assert [sku.color for sku in fallback] == ["白色"]
+    adapter.excluded_sku_ids.add(fallback[0].id)
+    assert await adapter.check_stock() == []
+    adapter.excluded_sku_ids.clear()
+    adapter.preferences["test"] = adapter.preferences["test"].model_copy(
+        update={"quantity": 2, "max_total": Decimal("12000")}
+    )
+    await page.set_content(
+        PRODUCT.replace(
+            "iPhone 17 256GB 白色'\"",
+            "iPhone 17 256GB 白色';"
+            "document.querySelector('[data-autom=full-price]').innerText='RMB 6000'\"",
+        )
+    )
+    assert [sku.color for sku in await adapter.get_skus()] == ["白色"]
     adapter.preferences["test"] = adapter.preferences["test"].model_copy(
         update={"color_priority": ["不存在的颜色"]}
     )

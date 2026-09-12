@@ -5,10 +5,12 @@ from types import SimpleNamespace
 from unittest.mock import AsyncMock
 
 import pytest
+from test_engine import FakeAdapter
 
 from src.core.config import ProductTarget, load_config
+from src.core.engine import Engine
 from src.core.exceptions import ConfigurationError
-from src.core.models import LoginStatus, Platform
+from src.core.models import CartState, LoginStatus, OrderResult, Platform
 from src.main import initialize
 from src.runtime import Runtime
 
@@ -102,3 +104,81 @@ async def test_finished_tmall_order_still_blocks_taobao_navigation(runtime, monk
     for method in (open_visible, open_product, login_status, read_order):
         method.assert_not_called()
     assert runtime.database.guard_status()["status"] == "UNKNOWN"
+
+
+async def test_finish_monitoring_task_keeps_session_and_allows_next_start(runtime, monkeypatch):
+    product_id = next(iter(runtime.config.products))
+    await runtime.save_target(
+        Platform.APPLE,
+        product_id,
+        ProductTarget(url="https://www.apple.com.cn/shop/buy-iphone/fixture"),
+    )
+    adapter = FakeAdapter(Platform.APPLE)
+    runtime.adapters[Platform.APPLE] = adapter
+    entered = asyncio.Event()
+
+    async def monitor_until_stopped():
+        entered.set()
+        await asyncio.Event().wait()
+
+    monkeypatch.setattr(adapter, "check_stock", monitor_until_stopped)
+    monkeypatch.setattr(Engine, "_notify", AsyncMock())
+    close_page = AsyncMock()
+    monkeypatch.setattr(runtime.manager, "close", close_page)
+    for _ in range(2):
+        entered.clear()
+        await runtime.start([Platform.APPLE], immediate=True, dry_run=True)
+        await asyncio.wait_for(entered.wait(), 2)
+        task = runtime.task
+        result = await runtime.finish_task()
+        assert result["ended"] and result["can_start_new_task"]
+        assert task.done() and not runtime.engine._tasks and not runtime.engine.running
+        assert runtime.adapters[Platform.APPLE] is adapter
+    assert len(runtime.database.recent("runs")) == 2
+    assert runtime.database.guard_status() is None
+    assert "add_to_cart" not in adapter.calls and "submit_order" not in adapter.calls
+    assert "close" not in adapter.calls
+    close_page.assert_not_awaited()
+
+
+@pytest.mark.parametrize("protection", ["SUCCESS", "UNKNOWN", "SUBMITTING", "CART_UNKNOWN"])
+async def test_finish_task_preserves_order_records_and_transaction_protection(
+    runtime, monkeypatch, protection
+):
+    adapter = runtime.adapters[Platform.APPLE]
+    adapter._cart_attempted = True
+    adapter._cart_state = CartState.ATTEMPTED_UNKNOWN
+    adapter._submit_attempted = protection != "CART_UNKNOWN"
+    run_id = runtime.database.create_run(None, "fixture")
+    if protection != "CART_UNKNOWN":
+        owner = run_id + ":apple"
+        assert runtime.database.claim_order(owner)
+        runtime.database.mark_submission(owner, "SUBMITTING")
+        if protection != "SUBMITTING":
+            runtime.database.mark_submission(owner, protection)
+        runtime.database.record_order(
+            run_id,
+            FakeAdapter(Platform.APPLE).sku,
+            protection,
+            result=OrderResult(
+                status="SUCCESS" if protection == "SUCCESS" else "UNKNOWN",
+                order_id="fixture-unpaid",
+                payment_state="UNPAID",
+            ),
+        )
+    original_guard = runtime.database.guard_status()
+    original_orders = runtime.database.recent("orders")
+    close_page = AsyncMock()
+    monkeypatch.setattr(runtime.manager, "close", close_page)
+    for _ in range(2):
+        result = await runtime.finish_task()
+        assert result["ended"] and not result["can_start_new_task"]
+        assert result["retained_protection"]["apple"]["cart_state"] == "ATTEMPTED_UNKNOWN"
+        assert runtime.database.guard_status() == original_guard
+        assert runtime.database.recent("orders") == original_orders
+        assert runtime.adapters[Platform.APPLE] is adapter
+        assert adapter._cart_attempted and adapter.cart_state == CartState.ATTEMPTED_UNKNOWN
+        assert adapter._submit_attempted == (protection != "CART_UNKNOWN")
+        with pytest.raises(ConfigurationError):
+            await runtime.start([Platform.APPLE], immediate=True, dry_run=True)
+    close_page.assert_not_awaited()

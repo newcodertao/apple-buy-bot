@@ -153,6 +153,14 @@ async def stop(request: Request):
     return await request.app.state.runtime.stop()
 
 
+@router.post("/finish-task")
+async def finish_task(request: Request):
+    try:
+        return await request.app.state.runtime.finish_task()
+    except BotError as exc:
+        raise HTTPException(409, str(exc)) from None
+
+
 @router.post("/confirm-address")
 @router.post("/confirm-market")
 async def confirm_checkout(request: Request, body: ConfirmationRequest):

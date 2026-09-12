@@ -32,7 +32,12 @@ class PurchasePlan(Model):
     products: list[PlannedProduct]
     payment_method: Literal["installments", "wechat"]
     installment_bank: str
-    address_basis: Literal["confirm_current_checkout"] = "confirm_current_checkout"
+    address_basis: Literal[
+        "confirm_current_checkout", "selected_saved_address_first_checkout_bind"
+    ] = "selected_saved_address_first_checkout_bind"
+    market_basis: Literal["manual_cn_confirmation", "apple_cn_direct_configured_product"] = (
+        "apple_cn_direct_configured_product"
+    )
     currency: Literal["CNY"] = "CNY"
     market: Literal["CN"] = "CN"
     approved_at: datetime | None = None
