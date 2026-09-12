@@ -1,6 +1,9 @@
 """CLI lifecycle and manual reconciliation checks without real browser commerce."""
 
 import asyncio
+import json
+from types import SimpleNamespace
+from unittest.mock import AsyncMock, Mock
 
 import pytest
 
@@ -11,6 +14,29 @@ from src.core.config import AppConfig
 from src.core.exceptions import HumanRequired
 from src.core.models import Platform
 from src.storage.database import Database
+
+
+async def test_check_login_without_product_url_uses_runtime(monkeypatch, capsys):
+    config = AppConfig()
+    assert not config.targets([Platform.JD])
+    actual_status = {"platform": "jd", "login": "REQUIRED", "status": "REQUIRED"}
+    runtime = SimpleNamespace(
+        config=config,
+        adapters={Platform.JD: None},
+        _require_session_idle=Mock(),
+        check_login=AsyncMock(return_value=actual_status),
+        close=AsyncMock(),
+    )
+    monkeypatch.setattr(cli, "load_config", lambda path: config)
+    monkeypatch.setattr("src.runtime.Runtime", lambda settings: runtime)
+    args = cli.parser().parse_args(["check-login", "jd"])
+
+    assert await cli.async_main(args) == 0
+
+    runtime._require_session_idle.assert_called_once_with(Platform.JD)
+    runtime.check_login.assert_awaited_once_with(Platform.JD)
+    assert json.loads(capsys.readouterr().out) == {"jd": actual_status}
+    runtime.close.assert_awaited_once()
 
 
 class ConsoleRuntime:

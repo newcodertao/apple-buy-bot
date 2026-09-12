@@ -69,6 +69,16 @@ def test_priorities_and_timezone():
     assert config.sale.target().isoformat() == "2026-09-12T20:00:00+08:00"
 
 
+def test_empty_variant_priorities_mean_any_but_model_is_required():
+    prefs = ProductPreferences(capacity_priority=[], color_priority=[])
+    assert prefs.capacity_priority == prefs.color_priority == []
+    with pytest.raises(ValidationError):
+        ProductPreferences(model_priority=[])
+    for field in ("capacity_priority", "color_priority"):
+        with pytest.raises(ValidationError):
+            ProductPreferences(**{field: [" "]})
+
+
 def test_product_override_and_target_order():
     config = AppConfig.model_validate(
         {

@@ -1,5 +1,50 @@
 # Apple 实页适配验收
 
+## 2026-09-12 追加：商城登录尝试与不限规格
+
+本轮基线 `606ffbda14fbd2b1d969f63e2b5767143658252f`，`git status --short` 为空。用户要求在 Apple 商店更新期间尝试现有京东/天猫/淘宝入口，随后明确 iPhone 18 系列容量、颜色不限，再转为搜索可行抢购策略。没有继续增加平台或凭据框架。
+
+### 当前实测，不等同于下方历史 Chrome 记录
+
+| 环节 | 本轮实际入口、结果与人工参与 |
+|---|---|
+| 程序 Edge 京东首次登录 | 正常 Web `/login` → `Runtime.open_login` → `BrowserManager`，使用 `data/profiles/msedge/jd`；返回200并打开京东登录。登录前 `/check-login` 返回 REQUIRED。用户在本机手动完成登录后提供截图，页面显示“当前页面异常”；再检查返回 UNKNOWN，没有将用户口述或 profile 存在当作认证成功 |
+| 京东公开目标 | 搜索工具从 Apple 产品京东自营旗舰店导航找到 Pro Max `https://item.jd.com/100317829587.html`、Pro `https://item.jd.com/100414360094.html`；只证明公开入口关联。搜索工具打开详情页仅得空壳，规格/价格/库存 NOT VERIFIED |
+| 程序 Edge 商品读取 | Web `/save-target` 为 `iphone18promax` 保存上述 Pro Max URL（200），卖家和配送依据留空，不猜测；随后 `/check-product` → `Runtime.check_product` → `JDAdapter.open_product` 返回409，原因 `Could not save minimized browser diagnostics; browser needs attention`。后续 `/check-login` 仍 UNKNOWN。仅只读窗口清单观察到标题“PC频控页 -京东商城 - 个人 - Microsoft Edge”，据此停止网站请求；没有足够证据判定具体账号/IP/浏览器特征原因。诊断保存失败的底层浏览器异常尚未定位，不能将其当作已修复 |
+| 天猫、淘宝 | 本轮真实程序登录、商品与交易 NOT RUN。Edge 未连接浏览器控制工具，创建其工具标签返回 `Browser is not available: edge`，此错误不是本轮淘宝域拒绝。历史淘宝工具访问拒绝保持历史标注，没有换程序/API绕过它 |
+| 规格选择、加购、购物车、结算、提交、付款 | 程序真实页面全部 NOT RUN。没有改真实购物车、点击付款/定金、创建或取消订单；没有以普通 Chrome 或历史待付款订单代替程序验收 |
+
+本轮网站操作使用仍在运行的基线 Web 服务 `python -u -m src.main web --port 8766`。完成以下源码更新后没有重启服务，保留当前浏览器页面。**本机配置已保存容量/颜色空列表、1件、总额15000；新配置在服务下次启动时生效。** 模型仍为已有且查到官方入口的 iPhone 18 Pro Max / Pro，没有凭空新增其他型号入口。开发仍 `dry_run=true`、`auto_submit=false`。
+
+### 本轮源码修改及本地验证
+
+- `src/main.py`、`tests/test_cli_safety.py`：CLI 没有商品 URL 也调用真实 Runtime 登录检查，去掉直接 UNKNOWN 的短路。新增普通 CLI 分发回归先失败1项（Runtime未调用），修复后与命令解析检查14项通过；该回归使用替身，不是实站登录证据。
+- `src/core/config.py`、`src/order/priority.py`、`checkout.py`、`plan.py`：容量/颜色空列表表示不限，型号仍必须非空；具体规格必须读取到，实际商品/数量/预算/结算身份仍严格核对。
+- `src/platforms/apple_cn/adapter.py`：不限时从当前可见规格选项寻找首个合格候选。已指定优先列表的原路径保持；未知加购/提交不能切换或重放。新品 Continue 没有获得新页面证据，仍未补齐。
+- `src/platforms/marketplace.py`：不限时接受页面当前明确选中规格，不把空白规格当合格，不扩展未验证交易选择器。
+- `src/web/index.html`、`README.md`：开始前计划明确显示“容量不限”“颜色不限”，解释空列表含义。
+- `tests/test_config.py`、`tests/test_unrestricted_variants.py`：先复现空列表被拒绝，再验证不限、严格型号/预算/结算、可见候选及首个匹配返回。相关本地64项通过，最终限缩到不限分支后Apple2项复查通过。页面为临时profile合成HTML，不是官网。
+
+完整 pytest **PASS：279 passed，0 failed、0 skipped，3 warnings，138.06秒**，退出0；证据 `outputs/market-sep12-full.txt/.xml`。Ruff `src tests`、compileall `src tests`、Web脚本语法与 `git diff --check` 均通过。之后仅更新文档。定向通过数不相加作为全量。完整运行命令及证据：
+
+```powershell
+git status --short
+git rev-parse HEAD
+.\.venv\Scripts\python.exe -m pytest -q --tb=short --junitxml=outputs/market-sep12-full.xml
+.\.venv\Scripts\python.exe -m ruff check src tests
+.\.venv\Scripts\python.exe -m compileall -q src tests
+node --check outputs/market-sep12-web.js
+git diff --check
+```
+
+测试进程仅移除三个可选凭据环境变量；没有修改用户环境或真实登录文件。实际 Web 请求均为本机 `http://127.0.0.1:8766`，控制头 `X-Apple-Bot-Control: local`，平台 `jd`：`POST /login`、`POST /check-login`、`POST /save-target`、`POST /check-product`。未调用 `/start`、提交或付款方法。原数据库只读全字段核对：仍1条SUCCESS guard，tuple JSON SHA256 `3c00c641d5215b0e570ab8aad8f424ae3c6d135d190aeb4f8b0ed710dc55af08`，没有删除或释放保护。
+
+### 官方资料研究，不是购买验收
+
+本轮实际搜索/打开 [Apple 新品公告](https://www.apple.com.cn/newsroom/2026/09/apple-debuts-iphone-18-pro-and-iphone-18-pro-max/)、[京东违规订单规则](https://help.jd.com/user/notice/detail-657bf0c2e4b092fb71dedf3e.html)、[京东抢购成功说明](https://help.jd.com/user/issue/38-33.html)、[淘宝/天猫预售协议](https://terms.alicdn.com/legal-agreement/terms/suit_bu1_tmall/suit_bu1_tmall202203151048_70887.html)。Apple 公告明确9月12日20:00预购、18日发售。未获得京东/天猫本次活动完整细则，不能把Apple时间直接套用其他渠道。京东规则限制未经认可的机器人购货；淘宝/天猫定金预售另有定金/尾款流程，不能按普通加购处理。建议当前使用能正常登录的官方客户端手动交易，程序做准备、核验与提醒；这是基于目前失败边界的工程建议，不是官方保证客户端抢购概率更高。
+
+---
+
 ## 2026-09-12 追加：按用户选择切换 Edge
 
 本轮基线 `6f3702a0bb570ccdb19eedd9da494785fb422788`，开工工作区干净。本机原配置仅增加 `app.browser: msedge`；`dry_run=true`、`auto_submit=false` 和原 SUCCESS 订单锁保留。

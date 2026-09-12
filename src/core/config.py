@@ -73,8 +73,9 @@ class SaleSettings(Model):
 
 class ProductPreferences(Model):
     model_priority: list[str] = Field(
-        default_factory=lambda: ["iPhone 18 Pro Max", "iPhone 18 Pro"]
+        default_factory=lambda: ["iPhone 18 Pro Max", "iPhone 18 Pro"], min_length=1
     )
+    # Empty variant lists explicitly allow any observed capacity/color, never an unknown one.
     capacity_priority: list[str] = Field(default_factory=lambda: ["512GB", "256GB", "1TB"])
     color_priority: list[str] = Field(
         default_factory=lambda: ["黑色", "银色", "冰川蓝色", "勃艮第酒红色"]
@@ -86,8 +87,8 @@ class ProductPreferences(Model):
     @field_validator("model_priority", "capacity_priority", "color_priority")
     @classmethod
     def priorities(cls, values: list[str]) -> list[str]:
-        if not values or any(not x.strip() for x in values) or len(set(values)) != len(values):
-            raise ValueError("Priorities must be nonempty, unique, nonblank values")
+        if any(not x.strip() for x in values) or len(set(values)) != len(values):
+            raise ValueError("Priorities must contain unique, nonblank values")
         return values
 
 

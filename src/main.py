@@ -246,12 +246,6 @@ async def check(runtime, command, platforms):
             results[platform.value] = {"status": "BLOCKED", "reason": "No configured product URL"}
             continue
         if command == "check-login":
-            if not targets:
-                results[platform.value] = {
-                    "login": "UNKNOWN",
-                    "reason": "No configured product URL",
-                }
-                continue
             results[platform.value] = await runtime.check_login(platform)
             continue
         for _, product, url in targets:

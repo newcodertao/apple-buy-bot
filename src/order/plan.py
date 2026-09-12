@@ -66,8 +66,10 @@ class PurchasePlan(Model):
             sku.platform != Platform.APPLE
             or product is None
             or sku.model != product.model
-            or sku.capacity not in product.capacities
-            or sku.color not in product.colors
+            or not sku.capacity.strip()
+            or not sku.color.strip()
+            or (product.capacities and sku.capacity not in product.capacities)
+            or (product.colors and sku.color not in product.colors)
             or quantity != product.quantity
             or sku.currency != self.currency
             or sku.price > product.max_unit_price

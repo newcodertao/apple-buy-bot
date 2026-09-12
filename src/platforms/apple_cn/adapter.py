@@ -346,19 +346,32 @@ class AppleCNAdapter(InspectionAdapter):
                     raise SelectorNotFound(
                         "UNKNOWN: configure product preferences before SKU discovery"
                     )
-                if (
-                    len(prefs.model_priority)
-                    * len(prefs.capacity_priority)
-                    * len(prefs.color_priority)
-                    > 64
-                ):
-                    raise ConfigurationError(
-                        "Apple candidate search is limited to 64 configurations"
-                    )
                 await self._locator("color").first.wait_for(state="attached")
                 for model in prefs.model_priority:
-                    for capacity in prefs.capacity_priority:
-                        for color in prefs.color_priority:
+                    capacities, colors = prefs.capacity_priority, prefs.color_priority
+                    if not capacities or not colors:
+                        if await self._locator("model").count():
+                            try:
+                                await self._choose("model", model)
+                            except CandidateUnavailable:
+                                continue
+                        # The existing snapshot includes only options with visible labels.
+                        # Disabled combinations are still candidates: another color may enable them.
+                        snapshot = await self._snapshot()
+                        capacities = capacities or [
+                            x["value"].upper() for x in snapshot["capacities"]
+                        ]
+                        colors = colors or [x["label"].strip() for x in snapshot["colors"]]
+                        if not capacities or not colors or any(not x for x in capacities + colors):
+                            raise SelectorNotFound(
+                                "UNKNOWN: visible Apple variant choices are missing"
+                            )
+                    if len(prefs.model_priority) * len(capacities) * len(colors) > 64:
+                        raise ConfigurationError(
+                            "Apple candidate search is limited to 64 configurations"
+                        )
+                    for capacity in capacities:
+                        for color in colors:
                             try:
                                 sku = await self._configure(model, capacity, color)
                             except CandidateUnavailable:

@@ -76,8 +76,12 @@ def platform_item_id(url: str, platform: Platform) -> str:
     return values[0] if len(values) == 1 and values[0].isdigit() else ""
 
 
-def matching_option(text: str, candidates: list[str]) -> str:
+def matching_option(text: str, candidates: list[str], *, allow_any: bool = False) -> str:
     """Match a complete rendered option, never a shorter model inside another."""
+    if not normalize(text):
+        raise SelectorNotFound("商品所选规格尚未显示")
+    if allow_any and not candidates:
+        return text.strip()
     values = [candidate for candidate in candidates if normalize(candidate) == normalize(text)]
     if len(values) != 1:
         raise SelectorNotFound("商品所选规格与配置无法唯一对应")
@@ -97,8 +101,8 @@ def parse_product(
         if not item_id or not data["title"]:
             raise ValueError
         model = matching_option(data["model"], preferences.model_priority)
-        capacity = matching_option(data["capacity"], preferences.capacity_priority)
-        color = matching_option(data["color"], preferences.color_priority)
+        capacity = matching_option(data["capacity"], preferences.capacity_priority, allow_any=True)
+        color = matching_option(data["color"], preferences.color_priority, allow_any=True)
         if not model_in_title(model, data["title"]):
             raise ValueError
         stock = StockState(data.get("stock_state", "UNKNOWN"))

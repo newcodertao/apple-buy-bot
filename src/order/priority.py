@@ -6,8 +6,14 @@ from src.core.models import SKU, Platform, SaleMode, StockState
 
 
 def score_sku(sku: SKU, preferences: Any) -> tuple[int, int, int] | None:
-    """Lower scores win; every option must be explicitly approved in config."""
-    if not sku.available or sku.currency != "CNY" or sku.price > Decimal(preferences.max_price):
+    """Lower scores win; empty variant priorities preserve observed option order."""
+    if (
+        not sku.capacity.strip()
+        or not sku.color.strip()
+        or not sku.available
+        or sku.currency != "CNY"
+        or sku.price > Decimal(preferences.max_price)
+    ):
         return None
     if sku.platform != Platform.APPLE and (
         sku.stock_state != StockState.AVAILABLE
@@ -20,8 +26,9 @@ def score_sku(sku: SKU, preferences: Any) -> tuple[int, int, int] | None:
     try:
         return (
             preferences.model_priority.index(sku.model),
-            preferences.capacity_priority.index(sku.capacity),
-            preferences.color_priority.index(sku.color),
+            preferences.capacity_priority.index(sku.capacity)
+            if preferences.capacity_priority else 0,
+            preferences.color_priority.index(sku.color) if preferences.color_priority else 0,
         )
     except ValueError:
         return None

@@ -123,8 +123,10 @@ def verify_checkout(
 ) -> None:
     if (
         sku.model not in preferences.model_priority
-        or sku.capacity not in preferences.capacity_priority
-        or sku.color not in preferences.color_priority
+        or not sku.capacity.strip()
+        or not sku.color.strip()
+        or (preferences.capacity_priority and sku.capacity not in preferences.capacity_priority)
+        or (preferences.color_priority and sku.color not in preferences.color_priority)
     ):
         raise OrderVerificationError("Selected SKU is outside the approved preferences")
     expected = {
