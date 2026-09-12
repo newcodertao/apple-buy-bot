@@ -22,27 +22,33 @@ async def doctor(config: AppConfig, online: bool = False) -> dict:
         "config": {"status": "PASS"},
     }
     checks["playwright"] = {"status": "PASS", "version": importlib.metadata.version("playwright")}
-    async with async_playwright() as playwright:
-        try:
-            # A disposable headless launch checks the actual selected browser,
-            # never the account profile or a bundled browser's unrelated path.
-            browser = await playwright.chromium.launch(
-                channel=config.app.browser, headless=True, chromium_sandbox=True
-            )
+    if config.app.browser == "extension":
+        checks["extension"] = {
+            "status": "NOT RUN",
+            "reason": "请启动 Web，在已登录的浏览器安装本项目扩展并连接选中标签页",
+        }
+    else:
+        async with async_playwright() as playwright:
             try:
+                # A disposable headless launch checks the actual selected browser,
+                # never the account profile or a bundled browser's unrelated path.
+                browser = await playwright.chromium.launch(
+                    channel=config.app.browser, headless=True, chromium_sandbox=True
+                )
+                try:
+                    checks[config.app.browser] = {
+                        "status": "PASS",
+                        "channel": config.app.browser,
+                        "version": browser.version,
+                    }
+                finally:
+                    await browser.close()
+            except Error:
                 checks[config.app.browser] = {
-                    "status": "PASS",
+                    "status": "FAIL",
                     "channel": config.app.browser,
-                    "version": browser.version,
+                    "reason": "所选浏览器无法启动，请检查安装和浏览器策略",
                 }
-            finally:
-                await browser.close()
-        except Error:
-            checks[config.app.browser] = {
-                "status": "FAIL",
-                "channel": config.app.browser,
-                "reason": "所选浏览器无法启动，请检查安装和浏览器策略",
-            }
     database = Database(config.paths.database)
     try:
         database.initialize()
@@ -52,16 +58,23 @@ async def doctor(config: AppConfig, online: bool = False) -> dict:
         checks["database"] = {"status": "FAIL", "reason": type(exc).__name__}
     finally:
         database.close()
-    manager = BrowserManager(config.paths.profiles, channel=config.app.browser)
-    checks["profiles"] = {
-        p.value: {
-            "exists": manager.profile_dir(p).is_dir(),
-            "session_group": session_key(p),
+    if config.app.browser == "extension":
+        checks["profiles"] = {
+            "source": "User-selected normal browser tabs",
             "login": "UNKNOWN",
-            "reason": "Profile existence is not authentication evidence",
+            "reason": "连接成功也必须继续检查页面上的真实登录状态",
         }
-        for p in Platform
-    }
+    else:
+        manager = BrowserManager(config.paths.profiles, channel=config.app.browser)
+        checks["profiles"] = {
+            p.value: {
+                "exists": manager.profile_dir(p).is_dir(),
+                "session_group": session_key(p),
+                "login": "UNKNOWN",
+                "reason": "Profile existence is not authentication evidence",
+            }
+            for p in Platform
+        }
     targets = config.targets()
     checks["targets"] = {
         "status": "PASS" if targets else "BLOCKED",

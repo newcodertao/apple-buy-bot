@@ -20,6 +20,7 @@ from src.core.config import OrderSettings, ProductPreferences, ProductTarget
 from src.core.exceptions import CandidateUnavailable, HumanRequired, SelectorNotFound
 from src.core.models import (
     SKU,
+    CartState,
     FinancingOffer,
     LoginStatus,
     OrderResult,
@@ -165,10 +166,17 @@ class MarketplaceAdapter(InspectionAdapter):
         self.selected: SKU | None = None
         self._quantity = 0
         self._cart_attempted = False
+        self._cart_state = CartState.NOT_ATTEMPTED
         self._submit_attempted = False
         self._last_review: OrderReview | None = None
         self._confirmed_address = ""
         self._confirmed_market = ""
+
+    @property
+    def cart_state(self) -> CartState:
+        if self._cart_attempted and self._cart_state == CartState.NOT_ATTEMPTED:
+            return CartState.ATTEMPTED_UNKNOWN
+        return self._cart_state
 
     def _digest(self, value) -> str:
         return hashlib.sha256(
@@ -264,6 +272,10 @@ class MarketplaceAdapter(InspectionAdapter):
         page = self._page()
         hosts = self.navigation_hosts.get(key, (urlsplit(page.url).hostname, *self.login_hosts))
         async with self.navigation_guard(page, allowed_hosts=hosts):
+            if key == "add_to_cart":
+                # Guards and selector validation above do not imply a click attempt.
+                self._cart_attempted = True
+                self._cart_state = CartState.ATTEMPTED_UNKNOWN
             await action.click()
 
     async def _choose(self, key: str, wanted: str) -> None:
@@ -354,7 +366,7 @@ class MarketplaceAdapter(InspectionAdapter):
     async def select_sku(self, sku: SKU) -> None:
         async with self._lock:
             await self._guard_human()
-            if self._cart_attempted or self._submit_attempted:
+            if self.cart_state != CartState.NOT_ATTEMPTED or self._submit_attempted:
                 raise HumanRequired("已有加购或提交尝试，须核对原页面，不能切换候选")
             if sku.platform != self.platform or sku.product_id != self.product_id:
                 raise HumanRequired("所选规格不属于当前渠道商品")
@@ -372,6 +384,8 @@ class MarketplaceAdapter(InspectionAdapter):
             self.selected = current
 
     async def _cart_check(self, quantity: int) -> None:
+        if self.cart_state == CartState.CART_VERIFIED:
+            self._cart_state = CartState.ATTEMPTED_UNKNOWN
         sku = self.selected
         if sku is None:
             raise HumanRequired("请先核验目标规格")
@@ -394,6 +408,25 @@ class MarketplaceAdapter(InspectionAdapter):
             or cny(await self._text("cart_total")) != sku.price * quantity
         ):
             raise HumanRequired("购物车销售方、数量、勾选状态或金额变化，请人工核对")
+        if quantity == self._quantity:
+            self._cart_state = CartState.CART_VERIFIED
+
+    async def verify_cart(self, quantity: int) -> None:
+        """Read the existing cart after an uncertain click; never add or change quantity."""
+        async with self._lock:
+            await self._guard_human()
+            if self.selected is None or quantity != self._quantity:
+                raise HumanRequired("缺少可核验的目标商品和原加购数量")
+            if not await self._field("cart_items").filter(visible=True).count():
+                # Only already mapped cart navigation is permitted during recovery.
+                for key in ("view_cart", "open_cart"):
+                    if (
+                        key in self.selectors
+                        and await self._field(key).filter(visible=True).count()
+                    ):
+                        await self._click(key)
+                        break
+            await self._cart_check(quantity)
 
     async def add_to_cart(self, quantity: int) -> None:
         async with self._lock:
@@ -405,7 +438,7 @@ class MarketplaceAdapter(InspectionAdapter):
             if "cart_items" in self.selectors and await self._field("cart_items").count():
                 await self._cart_check(quantity)
                 return
-            if self._cart_attempted:
+            if self.cart_state != CartState.NOT_ATTEMPTED or self._submit_attempted:
                 raise HumanRequired("已经尝试加购，请先核对购物车，禁止重复加购")
             # Checking an empty cart is a separate observed UI proof; no cleanup.
             if "cart_empty" not in self.selectors or "open_cart" not in self.selectors:
@@ -430,7 +463,6 @@ class MarketplaceAdapter(InspectionAdapter):
                 await field.press("Tab")
                 if await field.input_value() != str(quantity):
                     raise HumanRequired("当前页面不允许目标数量")
-            self._cart_attempted = True
             await self._click("add_to_cart")
             await self._field("cart_added").wait_for(state="visible", timeout=10000)
             await self._click("view_cart")

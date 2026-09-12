@@ -13,6 +13,13 @@ docs/apple-live-evidence.md
 docs/marketplace-integration-design.md
 docs/marketplace-live-evidence.md
 FILES.md
+extension/manifest.json
+extension/worker.mjs
+extension/bridge.mjs
+extension/bridge.test.mjs
+extension/popup.html
+extension/popup.mjs
+extension/README.md
 logs/.gitkeep
 pyproject.toml
 README.md
@@ -21,6 +28,7 @@ requirements.txt
 screenshots/.gitkeep
 src/__init__.py
 src/browser/__init__.py
+src/browser/extension.py
 src/browser/groups.py
 src/browser/inspection.py
 src/browser/manager.py
@@ -90,10 +98,13 @@ tests/test_cli_safety.py
 tests/test_cli_web.py
 tests/test_config.py
 tests/test_engine.py
+tests/test_extension_bridge.py
+tests/test_extension_runtime.py
 tests/test_inspect_cli.py
 tests/test_logging.py
 tests/test_local_login_state.py
 tests/test_marketplace_contracts.py
+tests/test_marketplace_cart_resume.py
 tests/test_marketplace_engine.py
 tests/test_marketplace_flow.py
 tests/test_marketplace_judgments.py

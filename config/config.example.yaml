@@ -3,7 +3,7 @@
 app:
   dry_run: true
   headless: false
-  browser: chrome  # chrome or msedge; installed stable browser, separate login profiles.
+  browser: extension  # extension: selected normal Chrome/Edge tabs; chrome/msedge: legacy profiles.
 sale:
   time: null  # Set confirmed local sale time, e.g. "2026-09-12 20:00:00"
   timezone: Asia/Shanghai
@@ -22,19 +22,16 @@ products:
       # Use IDs and region exactly as verified on the live marketplace page.
       # Empty seller_ids/region allow inspection, but never checkout submission.
       jd: {url: "", seller_ids: [], region: "", max_shipping: 0, max_fees: 0}
-      tmall: {url: "", seller_ids: [], region: "", max_shipping: 0, max_fees: 0}
       taobao: {url: "", seller_ids: [], region: "", max_shipping: 0, max_fees: 0}
   iphone18pro:
     model: "iPhone 18 Pro"
     platforms:
       apple: {url: ""}
       jd: {url: ""}
-      tmall: {url: ""}
       taobao: {url: ""}
 platforms:
   apple: {enabled: true}
   jd: {enabled: true, refresh_interval: 10}
-  tmall: {enabled: true, refresh_interval: 10}
   taobao: {enabled: true, refresh_interval: 10}
 monitor:
   normal_interval: 3.0

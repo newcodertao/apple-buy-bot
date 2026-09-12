@@ -9,7 +9,7 @@ import threading
 from pathlib import Path
 
 from src.browser.groups import unique_profile_platforms
-from src.core.config import DEFAULT_CONFIG, PROJECT_ROOT, load_config
+from src.core.config import DEFAULT_CONFIG, EXTENSION_PLATFORMS, PROJECT_ROOT, load_config
 from src.core.exceptions import BotError, ConfigurationError, HumanRequired
 from src.core.logging import redact
 from src.core.models import Platform
@@ -349,6 +349,11 @@ async def async_main(args) -> int:
         finally:
             database.close()
         return 0
+    if config.app.browser == "extension" and (
+        args.command in {"login", "check-login", "inspect"}
+        or (args.command in {"run", "dry-run", "check-stock"} and config.targets())
+    ):
+        raise ConfigurationError("扩展方式请启动 web，在本机控制台配对后执行购买或检查")
     runtime = Runtime(config)
     try:
         if args.command == "login":
@@ -366,7 +371,10 @@ async def async_main(args) -> int:
             destination = args.output or config.paths.screenshots / "inspections"
             await inspect_page(runtime, Platform(args.platform), args.url, destination)
         elif args.command in {"check-login", "check-stock"}:
-            platforms = list(Platform) if args.platform == "all" else [Platform(args.platform)]
+            platforms = (
+                list(EXTENSION_PLATFORMS if config.app.browser == "extension" else Platform)
+                if args.platform == "all" else [Platform(args.platform)]
+            )
             await check(runtime, args.command, platforms)
         elif args.command in {"dry-run", "run"}:
             platforms = (

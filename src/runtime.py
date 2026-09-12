@@ -8,7 +8,7 @@ import yaml
 from src.browser.groups import session_key
 from src.browser.manager import BrowserManager
 from src.core.clock import diagnostics
-from src.core.config import AppConfig, ProductTarget, validate_platform_url
+from src.core.config import EXTENSION_PLATFORMS, AppConfig, ProductTarget, validate_platform_url
 from src.core.engine import Engine, finish_cleanup
 from src.core.exceptions import ConfigurationError
 from src.core.logging import setup_logging
@@ -39,9 +39,14 @@ class Runtime:
         self.purchase_plan = load_plan(self._plan_path, draft_plan(config))
         self.database = Database(config.paths.database)
         self.database.initialize()
-        self.manager = BrowserManager(
-            config.paths.profiles, headless=config.app.headless, channel=config.app.browser
-        )
+        if config.app.browser == "extension":
+            from src.browser.extension import ExtensionBrowserManager
+
+            self.manager = ExtensionBrowserManager(config.paths.profiles)
+        else:
+            self.manager = BrowserManager(
+                config.paths.profiles, headless=config.app.headless, channel=config.app.browser
+            )
         self.adapters = self._build_adapters()
         self._bind_plan()
         self.engine = Engine(config, self.adapters, self.database)
@@ -165,6 +170,10 @@ class Runtime:
         async with self._control:
             self._require_login_idle(platform)
             page = await self.manager.open_visible(platform)
+            if self.config.app.browser == "extension":
+                # Keep an already logged-in tab in place; never replace it with a login URL.
+                self._session_status[platform.value] = "UNKNOWN"
+                return {"status": "已连接所选标签页；请在该页登录，然后点击检查登录"}
             # The same adapter domain guard also checks login navigation redirects.
             await self.adapters[platform]._navigate(page, LOGIN_URLS[platform])
             for channel in Platform:
@@ -185,6 +194,9 @@ class Runtime:
                     raise ConfigurationError("任务运行中，请等待暂停后检查当前页面登录状态")
             elif self.manager.current_page(platform) is None:
                 self._require_session_idle(platform)
+            if self.config.app.browser == "extension":
+                # Attach only after task ownership checks; keep the current page in place.
+                await self.manager.open(platform)
             adapter = self.adapters[platform]
             if self.manager.current_page(platform) is None:
                 targets = self.config.targets([platform])
@@ -352,12 +364,22 @@ class Runtime:
                 raise ConfigurationError("Runtime is closed")
             if self.engine.running or (self.task and not self.task.done()):
                 raise ConfigurationError("Engine is already running")
+            if self.config.app.browser == "extension" and platforms is not None:
+                if any(p not in EXTENSION_PLATFORMS for p in platforms):
+                    raise ConfigurationError("扩展仅支持淘宝、京东和 Apple")
             for channel in Platform:
                 self._require_session_idle(channel)
             if not self.config.targets(platforms):
                 raise ConfigurationError(
                     "No enabled product URLs; inspect and configure real URLs first"
                 )
+            if self.config.app.browser == "extension":
+                selected = {p for p, _, _ in self.config.targets(platforms)}
+                if len(selected) != 1:
+                    raise ConfigurationError("扩展每次只运行一个已绑定平台，请选择此平台开始")
+                connection = self.manager.broker.status()
+                if not connection["connected"] or connection.get("platform") not in selected:
+                    raise ConfigurationError("请先用扩展连接所选平台的购物标签页")
             if (
                 any(p == Platform.APPLE for p, _, _ in self.config.targets(platforms))
                 and isinstance(self.adapters.get(Platform.APPLE), AppleCNAdapter)
@@ -398,6 +420,9 @@ class Runtime:
         """End local automation without closing pages or reconciling any order."""
         async with self._control:
             await self._stop_locked()
+            if self.config.app.browser == "extension":
+                # Detach only: the user's tab remains and adapter/SQLite attempts stay intact.
+                await self.manager.close()
             guard = self.database.guard_status()
             retained = {}
             for platform, adapter in self.adapters.items():

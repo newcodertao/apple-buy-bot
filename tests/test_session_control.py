@@ -19,7 +19,10 @@ from src.runtime import Runtime
 async def runtime(tmp_path):
     path = tmp_path / "config/config.yaml"
     initialize(path)
-    instance = Runtime(load_config(path))
+    config = load_config(path)
+    # These controls exercise the existing program-owned profile, not tab pairing.
+    config = config.model_copy(update={"app": config.app.model_copy(update={"browser": "chrome"})})
+    instance = Runtime(config)
     try:
         yield instance
     finally:

@@ -304,11 +304,11 @@ class Engine:
         while True:
             try:
                 await self._ensure_clear(platform, state)
-                if name == "add_to_cart" and platform == Platform.APPLE:
+                if name == "add_to_cart":
                     adapter = self.adapters[platform]
                     cart_state = getattr(adapter, "cart_state", None)
                     if cart_state is None:
-                        raise HumanRequired("Apple cart status is unavailable; inspect the page")
+                        raise HumanRequired("Cart status is unavailable; inspect the page")
                     if cart_state == CartState.NOT_ATTEMPTED:
                         await self._call(platform, name, *args)
                     if adapter.cart_state != CartState.CART_VERIFIED:
@@ -320,10 +320,6 @@ class Engine:
                 return
             except (HumanRequired, RetryableError, TimeoutError, ConnectionError) as exc:
                 await self._pause(platform, state, _failure_reason(exc))
-                # Other channels retain their existing no-replay protection and checkout
-                # review. Apple additionally proves the exact bag before announcing success.
-                if name == "add_to_cart" and platform != Platform.APPLE:
-                    return
 
     async def _review(self, platform: Platform, sku: SKU):
         preferences = self.config.preferences_for(sku.product_id)

@@ -1,0 +1,11 @@
+{
+  "manifest_version": 3,
+  "name": "购买助手 · 当前标签页",
+  "version": "0.1.0",
+  "description": "把你明确选择的淘宝、京东或 Apple 中国大陆标签页连接到本机购买助手。",
+  "minimum_chrome_version": "125",
+  "permissions": ["activeTab", "debugger", "storage"],
+  "host_permissions": ["http://127.0.0.1/*", "http://localhost/*"],
+  "background": {"service_worker": "worker.mjs", "type": "module"},
+  "action": {"default_title": "连接购买助手", "default_popup": "popup.html"}
+}

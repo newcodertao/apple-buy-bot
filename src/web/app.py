@@ -5,6 +5,7 @@ from urllib.parse import urlsplit
 from fastapi import FastAPI, Request
 from fastapi.responses import HTMLResponse, JSONResponse
 
+from src.browser.extension import router as extension_router
 from src.core.config import AppConfig, load_config
 from src.web.api import router
 
@@ -41,4 +42,5 @@ def create_app(config: AppConfig | None = None, runtime=None) -> FastAPI:
         return Path(__file__).with_name("index.html").read_text(encoding="utf-8")
 
     app.include_router(router)
+    app.include_router(extension_router)
     return app

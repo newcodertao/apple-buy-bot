@@ -20,6 +20,7 @@ ALLOWED_HOSTS = {
     Platform.TMALL: ("tmall.com",),
     Platform.TAOBAO: ("taobao.com",),
 }
+EXTENSION_PLATFORMS = (Platform.APPLE, Platform.JD, Platform.TAOBAO)
 
 
 def validate_platform_url(platform: Platform, url: str) -> str:
@@ -46,7 +47,7 @@ def validate_platform_url(platform: Platform, url: str) -> str:
 class AppSettings(Model):
     dry_run: bool = True
     headless: bool = False
-    browser: Literal["chrome", "msedge"] = "chrome"
+    browser: Literal["chrome", "msedge", "extension"] = "chrome"
 
 
 class SaleSettings(Model):
@@ -221,6 +222,8 @@ class AppConfig(Model):
 
     def targets(self, platforms=None) -> list[tuple[Platform, str, str]]:
         selected = set(platforms if platforms is not None else Platform)
+        if self.app.browser == "extension":
+            selected.intersection_update(EXTENSION_PLATFORMS)
         ordered = sorted(
             self.products.items(), key=lambda item: self.product.model_priority.index(item[1].model)
         )

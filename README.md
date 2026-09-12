@@ -1,62 +1,48 @@
 # apple-buy-bot
 
-本轮只推进 Apple 中国大陆官网的本机购买流程，使用正式版 Chrome/Edge 和程序专用登录会话，不扩展平台或框架。开始前一次确认购买条件，随后按优先级选择首个合格 SKU、核验购物袋和结算；登录或实际内容变化时保留页面供人工处理。**程序独立 profile 尚未完成“登录 → 开始 → 选择 → 加购一次 → 真实结算页”验收。** 2026-09-12 已在普通 Chrome 查看新品 Continue，但按钮仍禁用，启用后的流程未执行；程序登录页转圈仍在定位。既有 SUCCESS 订单锁保留，不清锁通过验收。详细结果见 [验收记录](VALIDATION.md)。
+当前开发范围为 **淘宝、京东、Apple 中国大陆**。浏览器扩展连接你主动选择的日常 Chrome/Edge 标签页，复用该页登录；本机 Python 程序继续负责开售时间、候选优先级、预算、购物车核验和订单锁。不是三个平台均已完成实站抢购，实际缺口见下表与 [VALIDATION.md](VALIDATION.md)。
 
-2026-09-12 按用户选择增加现有正式版 Edge：本机配置现为 `app.browser: msedge`，通用示例仍默认 `chrome`。CLI/Web/doctor 都使用所选浏览器，网页显示当前选择。只支持这两个已安装渠道，启动失败不自动换浏览器。Edge 资料在 `data/profiles/msedge/<平台>`，Chrome 原目录不变；两者共享同一任务锁、数据库和购买计划，切换不会解除已有订单保护。先关闭原程序浏览器再切换配置并重启服务，日常浏览器无需关闭。
+## 使用浏览器扩展
 
-Edge 的本地登录状态持久化检查通过；真实 Apple 登录入口本轮首次返回 HTTP 503，尚未认证。切换浏览器不代表已解决官网转圈或已通过真实结算。
+1. 安装本项目依赖：`.venv\Scripts\python.exe -m pip install -r requirements.txt`。
+2. 本机 `config/config.yaml` 设置 `app.browser: extension`。开发保持 `app.dry_run: true`、`order.auto_submit: false`。示例只提供三个平台，商品链接和开售时间须根据实际页面填写。
+3. 启动普通 Web 入口：`.venv\Scripts\python.exe -m src.main web --port 8766`。不要与旧服务重复占用端口；旧任务有待核对页面时先保留它。
+4. 在日常 Chrome 的扩展管理页（Edge 使用自己的扩展管理页）加载已解压的 `D:\Apple\apple-buy-bot\extension` 文件夹。需要 Chrome/Edge 125+，不降级、不复制默认用户资料。完整说明见 [扩展说明](extension/README.md)。
+5. 控制台点击“生成本机连接码”。到已登录的购物标签页打开扩展，填写控制台地址和连接码，点击连接。连接码仅在本机使用，不发聊天、不提交仓库。
+6. 回到本机控制台选择对应平台，点击“检查登录”；检查页面真实登录状态后再按本次条件开始。验证码、短信和设备确认由你完成，随后点击“人工处理后继续”。
 
-所有最终支付由用户手动完成。没有验证码识别、滑块破解、短信/人脸/设备验证绕过、隐身插件、代理轮换、批量账号或私有下单接口。
+扩展每次只绑定一个平台的一张标签页，连接本身不启动购买。浏览器正常显示调试连接提示。扩展不能自动接管新弹窗或不在范围内的页面，遇到未适配分支会停下。普通浏览器中的其他标签页不会暴露给程序。
 
-## 快速运行（Windows / PowerShell 7）
+“结束本机任务”停止引擎并断开扩展，保留你的页面、历史订单和现有加购/未知提交保护。断线不等于没有执行，程序不会重新发送旧动作。已有 SUCCESS/UNKNOWN/SUBMITTING guard 仍阻止新订单，也不会因切换平台、重新连接、批准购买条件而清除。
 
-本目录已建立 `.venv` 并安装依赖。运行：
+扩展当前使用 **Web → Runtime → Engine → 原 Adapter** 入口。直接执行 `run`、`login` 等独立 CLI 进程不能复用 Web 配对，会提示改用 Web；`init/status/doctor` 仍可用。旧 `chrome`/`msedge` 专用 profile 模式为兼容已有使用和历史核对保留。
+
+## 实际适配边界
+
+| 平台/功能 | 当前范围与限制 |
+|---|---|
+| 扩展连接 | 本机配对、选定标签、独立导航保护、断线不重放；本轮本地与实站证据分别记录 |
+| Apple | 沿用已有商品、规格、购物袋、结算核验；新品启用后的 Continue 仍缺真实页面证据，没有宣称已适配 |
+| 京东 | 已有商品/购物车字段不完整；新版确认订单包含立即付款，继续保持人工处理；不能宣称自动交易已通过 |
+| 淘宝 | 用户希望从已有购物车商品开始，避开无法在电脑打开的详情页；该入口尚未实现。读取真实购物车被浏览器工具站点安全策略拒绝，未绕行采集或猜测生产选择器 |
+| 天猫历史记录 | 不作为本轮扩展平台；原数据、适配代码和跨平台订单保护保留 |
+
+开发默认不提交订单。正式提交必须同时在本机明确配置关闭 dry-run、开启 auto_submit，并通过原有订单核验与单次提交保护；网页/API不能打开提交。最终支付仍由你完成。无验证码破解、代理轮换、私有下单接口或 Cookie 导出。
+
+数量、预算仍按本机配置执行；空容量/颜色优先列表表示接受实际读取到的任何规格，不能接受未知规格。当前授权为 iPhone 18 系列、1 件、总额不高于 ¥15,000，具体型号入口只能来自实际页面。
+
+## 开发验证
 
 ```powershell
-Set-Location 'D:\Apple\apple-buy-bot'
-& .\.venv\Scripts\python.exe -m src.main doctor
-& .\.venv\Scripts\python.exe -m src.main web
+.venv\Scripts\python.exe -m pytest -q
+.venv\Scripts\python.exe -m ruff check src tests
+.venv\Scripts\python.exe -m compileall -q src tests
+node --test extension/bridge.test.mjs
 ```
 
-打开 <http://127.0.0.1:8765>，选择 Apple 后点击“打开登录”，在程序浏览器手动登录，再点击“检查登录”。保存商品配置并查看“本次购买条件”，点击“开始此平台”或“立即演练此平台”时，一次确认商品、备选规格、数量、预算、收货依据和付款方式。相同条件沿用本机确认，不再分别要求批准计划、确认商品和确认地址。默认 `dry_run: true`、`auto_submit: false`；确认不会改变这些开关，网页/API 无法关闭演练保护或开启自动提交。
+真实扩展集成测试仅使用临时 Chromium、临时数据库和本地 HTML，并未访问真实账户或创建订单。测试用弹出页不产生浏览器工具栏的 activeTab 手势，因此仅临时测试副本增加合成页面域权限；发布的 manifest 不包含购物站点常驻权限。程序专用 profile、日常 Chrome、扩展与合成页面的记录严格分开。
 
-需要使用其他端口时运行 `python -m src.main web --port 8766`，按启动输出访问对应地址；不要在同一端口重复启动。
-
-京东检查结果返回公开店铺 ID；天猫官方店使用其公开店铺域名作为标识，配送地区使用本机摘要，不显示收货地址。商品未选规格或报价为补贴、领券条件价时，检查结果明确说明阻塞原因。“检查当前结算”可读取京东已打开的新版结算窗口，报告实际金额、24 期费用和最终按钮类型；它不点击付款。“读取当前订单”仅核对已记录订单的回执，不重复提交。
-
-新环境安装：
-
-```powershell
-python -m venv .venv
-& .\.venv\Scripts\python.exe -m pip install -r requirements.txt
-& .\.venv\Scripts\python.exe -m src.main init
-& .\.venv\Scripts\python.exe -m pytest -v
-& .\.venv\Scripts\python.exe -m ruff check .
-```
-
-要求 Python 3.12+ 和已安装的正式版 Google Chrome 或 Microsoft Edge；程序按 app.browser 使用 Playwright 的 chrome 或 msedge 通道，CLI、网页登录和购买流程统一使用正式版，不回退到 Chrome for Testing。程序使用专用 profile，不读取或继承日常 Chrome 的默认资料目录；日常 Chrome 已登录不代表程序已登录。首次在程序中登录后保存，过期或验证时人工处理。
-
-本机使用 Python 3.14.5、Playwright 1.62.0。`requirements.lock.txt` 保存已记录的直接/间接依赖版本，可先安装它，再执行 `pip install -e . --no-deps` 复现。Python 3.12 本身未单独运行兼容性测试。
-
-## 当前状态与证据（2026-09-12）
-
-| 项目 | 本轮结果 | 证据边界 |
-|---|---|---|
-| 全量 pytest / Ruff / compileall | 见本轮 VALIDATION | 以本轮最终执行记录为准；本地测试不代表实站交易通过 |
-| 一次开始前确认、暂停恢复、结束任务 | 已接入 CLI/Web | 确认未变化时复用；finish 保留页面、订单记录和交易保护；本地回归及 UI 点击结果见 VALIDATION |
-| Chrome/Edge 持久会话 | 已实现；真实登录仍待核实 | 手动登录程序 profile 一次，后续复用；每次运行仍检查真实登录状态，普通 Chrome 登录不等同程序登录 |
-| Apple 受保护演练 | 本地合成页面与实站分开记录 | 正常 Runtime 流程的本地测试不能证明程序 profile 已到真实结算页 |
-| 本机原 SUCCESS 订单锁 | 保留 | 既有保护优先于新的开始确认，不删除数据库、不清锁运行新测试单 |
-| 首个合格 SKU、购物袋恢复 | 已实现 | 按配置优先级找到合格组合即继续；仅加购前明确失效可回退，未知加购或提交不重放 |
-| 24 期零费用方案 | 实页完整披露未验证 | 核对当前已选方案的银行、本金、总额、利息、手续费和每期金额；缺失为 UNKNOWN |
-| 地址与大陆官网直售依据 | 已合并到开始条件 | 首次完整读取已保存的选中地址后绑定；地址变化重新确认。CN 官网直售批准依据不冒充独立版本证明 |
-| Apple 新品 Continue | 普通 Chrome 已观察；后续 NOT RUN | 9 月 12 日 13:35，Pro Max / 512GB / 黑色 / ¥12,999，Continue 禁用；页面写明当日 20:00 接受预购 |
-| Apple 程序 profile 真实结算 | NOT RUN | 登录页转圈仍在定位；未完成加购一次及真实结算页验收 |
-| JD / Tmall / Taobao 真实交易 | NOT RUN | 本轮不增加平台；京东“立即支付”仍人工处理 |
-
-历史：2026-09-10 曾通过程序读取 [Apple iPhone 18 Pro / Pro Max 商品页](https://www.apple.com.cn/shop/buy-iphone/iphone-18-pro)；普通 Chrome 曾在用户授权下创建一笔微信待付款单，未付款。程序独立 profile 的购物袋/配送存在 404/541 记录。以上均不是本轮实测，旧诊断产物也不满足本轮最小采集规则。
-
-9 月 12 日普通 Chrome 的新品页面观察见本轮 [验收记录](VALIDATION.md)；它只证明当时的商品配置、价格和禁用按钮，不证明启用后的 Continue 路径已适配。开售前后仍需核对当前页面和本机配置。`config.example.yaml` 留空商品 URL 和时间。更早的选择器证据见 [Apple 实页记录](docs/apple-live-evidence.md)，不作为本轮执行或抢购性能证据。
+以下保留已有目录和兼容模式说明；本轮支持范围以上述三平台与验收记录为准。
 
 ## 目录与职责
 
@@ -91,7 +77,7 @@ apple-buy-bot/
 
 ## CLI
 
-以下命令均可用；已激活虚拟环境时可以写 `python`，否则使用 `& .\.venv\Scripts\python.exe`。
+以下为专用 profile 模式的兼容命令；扩展模式使用上方 Web 入口。已激活虚拟环境时可以写 `python`，否则使用 `& .\.venv\Scripts\python.exe`。
 
 ```powershell
 python -m src.main init

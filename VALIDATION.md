@@ -1,3 +1,84 @@
+# 验收记录
+
+## 2026-09-12 本轮：淘宝、京东、Apple 浏览器扩展
+
+基线 `9962ebddc75dbbdef3227668ae953b79ca489bf6`，开工 `git status --short` 为空。本轮沿用现有仓库，不重建架构；扩展绑定日常浏览器当前标签页，Web → Runtime → Engine → 现有 Adapter 继续负责购买。只提供淘宝、京东、Apple 三个平台入口，旧天猫数据与保护判断保留。
+
+### 本轮修改
+
+| 文件 | 修改原因与行为 |
+|---|---|
+| `extension/manifest.json`, `worker.mjs`, `bridge.mjs`, `popup.html`, `popup.mjs` | Manifest V3，本机配对，只暴露主动绑定的一张购物标签页。通过浏览器公开 debugger API 复用现有 Playwright 页面流程，不复制 profile/Cookie。拒绝新建/关闭标签、关闭浏览器、Cookie 导出和 HTTP 重放命令；断线不自动重连或重放。后台监听器同步注册，修复真实临时 Chromium 中顶层 await 导致后台无法启动的问题；原生调试会话共享请求拦截，所有检查同意后才放行一次 |
+| `src/browser/extension.py`, `src/web/app.py` | 本机 WebSocket 中继，配对码仅本机传递；严格 Host/Origin/loopback/令牌检查，只容纳一个扩展和一个控制器。复用原 ProfileLock；关闭只回收连接，不关闭用户页面。已发出的动作结果仍须由业务核验，不把断线解释成未执行 |
+| `src/core/config.py`, `config/config.example.yaml`, `src/runtime.py`, `src/main.py`, `src/diagnostics.py` | 增加 extension 模式，限制一次运行当前绑定平台；检查登录不导航离开当前页。结束本机任务断开扩展但保留 Adapter 加购/提交尝试和 SQLite guard。独立 CLI 购买进程不能假装复用 Web 配对；提示从普通 Web 入口继续 |
+| `src/core/engine.py`, `src/platforms/marketplace.py` | 修复非 Apple 加购暂停后直接当作成功的旧逻辑。统一 NOT_ATTEMPTED / ATTEMPTED_UNKNOWN / CART_VERIFIED；点击前暂停恢复可执行第一次加购，点击后未知只读核验；不核验通过不通知加购成功、不进入结算 |
+| `src/web/index.html`, `README.md`, `FILES.md`, `extension/README.md` | 三平台控制台、明确连接反馈、安装与实际适配边界。没有把“配对成功”显示为“已登录” |
+| `pyproject.toml`, `requirements.lock.txt` | 添加本机 WebSocket 中继所需 websockets（实际17.1），Playwright最低1.62以支持 no_defaults，连接时不覆盖日常浏览器的下载、焦点或媒体默认设置。没有新增商城私有鉴权模块 |
+| `tests/test_config.py`, `test_session_control.py` | 示例默认方式更新为扩展；旧专用 profile 生命周期夹具明确指定 chrome，保留原断言。扩展连接与留页由真实临时 Chromium 测试覆盖，不能把两种模式混用 |
+| `tests/test_extension_bridge.py`, `test_extension_runtime.py`, `test_marketplace_cart_resume.py`, `extension/bridge.test.mjs` | 分别检查本机配对/清理、正常扩展入口、三态加购恢复、原生调试消息协调与隐私过滤；不使用真实账户或原数据库 |
+
+### 真实浏览器与商城边界
+
+- 用户提供了淘宝购物车链接，并说明商品详情不支持电脑浏览、商品已在购物车。本轮调整方向为未来从已有购物车条目开始，不再要求重复加购；**这个购物车入口尚未实现**，不能写成购物车流程通过。
+- Chrome 页签清单实际找到用户原有“淘宝网 - 我的购物车”；随后读取该页被工具明确拒绝：`Browser use is not permitted on https://cart.taobao.com/cart.htm`。这是站点安全策略拒绝，工具注明没有发起用户权限提示或自动审批；没有改用扩展、原始 CDP、其他浏览器、接口或间接执行绕过。仅页签元数据已读取，购物车内容、勾选、金额、结算均 **BLOCKED / NOT RUN**。
+- 本轮真实 Apple 商品/新品启用 Continue/购物袋/结算 **NOT RUN**。现有启用 Continue 分支仍明确暂停，未根据假想页面编写选择器。
+- 本轮真实京东商品/购物车/结算 **NOT RUN**。已有购物车字段尚未补齐；新版确认订单与立即支付仍人工处理，不绕开付款分支。
+- 没有安装到用户日常 Chrome，没有运行原账户购买任务，没有真实加购、提交、付款或取消订单。日常浏览器登录、程序独立 profile 历史与本轮临时浏览器测试不混用。
+- 原 `8766` Web 服务（本轮只读确认 PID17288）未重启，原 Edge 页面保留；原启动版本见前轮记录。源码修改不表示该进程已加载新后端。
+
+### 本地验证
+
+扩展后台已在临时 Chromium 空白页实际加载，修复了启动失败；Node 的模拟 Chrome/CDP 检查只证明路由规则。`tests/test_extension_runtime.py` 使用真正扩展、普通 Web 控制入口、Runtime/Engine/Apple Adapter 和临时数据库，所有商城 HTTP 请求都以本地 HTML 响应，其他 HTTP 请求中止。测试副本仅为模拟工具栏 activeTab 授权而额外允许合成 Apple 域；生产 manifest 未扩大权限。测试中的 iPhone17/微信是现有本地夹具，不是本次真实购买计划。
+
+| 环节 | 实际方法/入口与本地页面结果 | 人工与真实网站边界 |
+|---|---|---|
+| 连接、首次登录检查 | `/extension/pair` → 普通扩展弹窗 → `/check-login` → `Runtime.check_login` → `AppleCNAdapter.login_status`，先 REQUIRED | 登录控件为本地 HTML；不证明真实登录 |
+| 开始前确认、暂停恢复 | 未批准 `/start` 返回409；`/approve-plan` → `/start` → `Runtime.start` → `Engine.run`，登录暂停；模拟登录后 `/check-login` 返回 AUTHENTICATED，再 `/resume` | 通过普通 Web 控制 API 确认本地计划，没有直接注入 Adapter 确认状态；真实用户凭据未读取 |
+| 商品、规格、加购 | 原 Apple Adapter 的 `open_product/check_stock/select_sku/add_to_cart/verify_cart`，加购事件一次，购物袋核验为 CART_VERIFIED | iPhone17本地夹具；新品 Continue 分支未覆盖、未实现 |
+| 结算核验 | `checkout/verify_order` 后状态 READY_TO_SUBMIT；记录动作严格为 add、view_bag、checkout 各一次 | 本地地址/金额/微信选项；真实地址、24期免息、真实结算 NOT RUN |
+| 结束 | `/finish-task` → `Runtime.finish_task`，原页面和另一张无关标签页仍打开；临时 CLAIMED guard保持 | 不提交、不付款；原成功订单保护另行只读核对 |
+
+首次全量运行真实结果为 **6 failed、285 passed、3 warnings，96.45秒**（`outputs/extension-full.txt/.xml`）。六项均来自旧专用 profile 夹具隐含使用示例浏览器，示例改为 extension 后走入扩展分支；修复为明确指定 chrome，未删除或放宽断言。首次修改直接赋值被冻结配置模型拒绝（该定向运行9个setup errors）；改用项目已有 model_copy 后定向9项通过。独立复查另发现断开重连竞态和重定向响应头过滤遗漏，修复后重新验收，最终结果如下。
+
+完整 pytest **PASS：291 passed，0 failed、0 skipped，3 warnings，99.56秒**，退出0；证据 `outputs/extension-final.txt/.xml`。这一次运行覆盖本轮最终 Python 源码和原生扩展集成，不是将定向通过数相加。三条警告为现有 Starlette/httpx/AnyIO 弃用与 Pydantic Decimal 夹具序列化提示。
+
+完整运行后仅对扩展 JS 的旧异步回调做最后窄修复：旧页面读取、旧 WebSocket 或旧调试事件的异常不能断开新绑定。该修改后的 Node **11/11 PASS、0 skipped**；原生扩展集成复查 **1 passed、4.39秒**，证据 `outputs/extension-recheck.txt/.xml`，仍从普通弹窗/Web/Runtime入口到 READY_TO_SUBMIT，加购一次、无提交。JS语法复查通过。
+
+Ruff `src tests`、compileall `src tests`、扩展与控制台 JS 语法检查通过。环境为 Python3.14.5、Node24.19.0、Playwright1.62.0、websockets17.1、pytest9.1.1、Ruff0.16.6。
+
+原真实数据库开工与全部测试完成后只读核验一致：1条 SUCCESS guard，tuple JSON SHA256均为 `3c00c641d5215b0e570ab8aad8f424ae3c6d135d190aeb4f8b0ed710dc55af08`。没有删除、释放或替换数据库。
+
+### 本轮实际命令
+
+```powershell
+git status --short
+git rev-parse HEAD
+.venv\Scripts\python.exe -m pip install 'websockets>=15,<18'
+.venv\Scripts\python.exe -m pytest tests/test_marketplace_cart_resume.py tests/test_marketplace_flow.py tests/test_marketplace_engine.py tests/test_cart_runtime_engine.py tests/test_engine.py -q
+.venv\Scripts\python.exe -m pytest tests/test_extension_bridge.py -q
+.venv\Scripts\python.exe -m pytest tests/test_config.py tests/test_cli_web.py -q
+.venv\Scripts\python.exe -m pytest tests/test_extension_runtime.py -x -q
+.venv\Scripts\python.exe -m pytest tests/test_session_control.py -q --tb=short
+.venv\Scripts\python.exe -m pytest -q --tb=short --junitxml=outputs/extension-full.xml
+.venv\Scripts\python.exe -m pytest -q --tb=short --junitxml=outputs/extension-final.xml
+.venv\Scripts\python.exe -m pytest -q tests/test_extension_runtime.py --tb=short --junitxml=outputs/extension-recheck.xml
+node --test extension/bridge.test.mjs
+.venv\Scripts\python.exe -m ruff check src tests
+.venv\Scripts\python.exe -m compileall -q src tests
+node --check outputs/extension-web.js
+node --check extension/worker.mjs
+node --check extension/popup.mjs
+node --check extension/bridge.mjs
+git diff --check
+git ls-remote origin refs/heads/main
+```
+
+测试进程仅移除三个可选凭据环境变量，没有修改用户的持久环境或登录文件。独立复查已修正断开期间重连、旧异步回调影响新连接，以及 `redirectResponse`/原始头文本中的敏感信息遗漏。控制台仅通过本机明示配对连接；调试权限本身仍有较高能力，只用于信任的本机程序。
+
+本轮还查阅 Chrome 官方 content scripts / messaging / debugger 文档和 websockets 发布页用于公开扩展 API 与依赖核对，不是实站交易执行结果。以下全部为历史轮次，不能作为本轮验收。
+
+---
+
 # Apple 实页适配验收
 
 ## 2026-09-12 追加：商城登录尝试与不限规格
